@@ -350,42 +350,72 @@ function RevenueBars({
     return <p className="py-12 text-center text-sm text-muted-foreground">لا توجد بيانات بعد</p>;
   }
 
-  const magnitudes = data.map((point) => Number.parseFloat(point.revenue) || 0);
-  const peak = Math.max(...magnitudes, 1);
+  // Scaled against the largest value in EITHER series. Scaling to revenue alone
+  // would let a month whose cost exceeded its revenue overflow the track.
+  const peak = Math.max(
+    ...data.map((point) =>
+      Math.max(Number.parseFloat(point.revenue) || 0, Number.parseFloat(point.cogs) || 0),
+    ),
+    1,
+  );
 
   return (
-    <div className="flex h-56 items-end justify-between gap-2" role="img" aria-label="مخطط الإيرادات الشهرية">
-      {data.map((point) => {
-        const revenue = Number.parseFloat(point.revenue) || 0;
-        const cogs = Number.parseFloat(point.cogs) || 0;
-        const revenueHeight = Math.max(2, (revenue / peak) * 100);
-        const cogsHeight = Math.max(0, (cogs / peak) * 100);
+    <div>
+      <div className="mb-3 flex items-center gap-4 text-xs text-muted-foreground">
+        <span className="flex items-center gap-1.5">
+          <span className="h-2.5 w-2.5 rounded-sm bg-primary" aria-hidden="true" />
+          الإيرادات
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="h-2.5 w-2.5 rounded-sm bg-primary/35" aria-hidden="true" />
+          تكلفة المبيعات
+        </span>
+      </div>
 
-        return (
-          // `h-full` on the bar's wrapper only resolves if every ancestor up to
-          // the fixed-height track also has a definite height — otherwise the
-          // percentage is measured against `auto` and every bar collapses to zero.
-          <div key={point.month} className="group flex h-full min-w-0 flex-1 flex-col items-center gap-2">
-            <div className="relative flex min-h-0 w-full flex-1 items-end justify-center">
-              <div
-                className="w-full max-w-10 rounded-t bg-primary/85 transition-all group-hover:bg-primary"
-                style={{ height: `${revenueHeight}%` }}
-              />
-              <div
-                className="absolute bottom-0 w-full max-w-10 rounded-t bg-primary/25"
-                style={{ height: `${cogsHeight}%` }}
-                aria-hidden="true"
-              />
-              <span className="pointer-events-none absolute -top-1 hidden -translate-y-full whitespace-nowrap rounded bg-popover px-2 py-1 text-[11px] shadow-lg ring-1 ring-border group-hover:block">
-                {formatMoney(point.revenue, { currency, compact: true })}
+      <div
+        className="flex h-52 items-end justify-between gap-2"
+        role="img"
+        aria-label="مخطط الإيرادات وتكلفة المبيعات الشهرية"
+      >
+        {data.map((point) => {
+          const revenue = Number.parseFloat(point.revenue) || 0;
+          const cogs = Number.parseFloat(point.cogs) || 0;
+
+          // Two bars side by side rather than one overlaid on the other. Stacking
+          // them made a month whose cost exceeded its revenue look like a
+          // rendering fault instead of the loss-making month it actually was.
+          const revenueHeight = Math.max(2, (revenue / peak) * 100);
+          const cogsHeight = Math.max(2, (cogs / peak) * 100);
+
+          return (
+            // `h-full` on a bar only resolves if every ancestor up to the
+            // fixed-height track also has a definite height — otherwise the
+            // percentage is measured against `auto` and the bar collapses to zero.
+            <div
+              key={point.month}
+              className="group flex h-full min-w-0 flex-1 flex-col items-center gap-2"
+            >
+              <div className="relative flex min-h-0 w-full flex-1 items-end justify-center gap-[3px]">
+                <div
+                  className="w-1/2 max-w-5 rounded-t bg-primary/85 transition-colors group-hover:bg-primary"
+                  style={{ height: `${revenueHeight}%` }}
+                />
+                <div
+                  className="w-1/2 max-w-5 rounded-t bg-primary/35 transition-colors group-hover:bg-primary/50"
+                  style={{ height: `${cogsHeight}%` }}
+                />
+                <span className="pointer-events-none absolute -top-1 hidden -translate-y-full whitespace-nowrap rounded bg-popover px-2 py-1 text-[11px] shadow-lg ring-1 ring-border group-hover:block">
+                  إيراد {formatMoney(point.revenue, { currency, compact: true })} · تكلفة{' '}
+                  {formatMoney(point.cogs, { currency, compact: true })}
+                </span>
+              </div>
+              <span className="numeric truncate text-[10px] text-muted-foreground">
+                {point.month.slice(2)}
               </span>
             </div>
-            <span className="numeric truncate text-[10px] text-muted-foreground">
-              {point.month.slice(2)}
-            </span>
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
     </div>
   );
 }

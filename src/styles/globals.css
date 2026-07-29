@@ -51,8 +51,21 @@
 
   --radius: 0.625rem;
 
-  --font-sans: 'Noto Kufi Arabic', 'Segoe UI', 'Tahoma', system-ui, sans-serif;
-  --font-mono: 'JetBrains Mono', 'Cascadia Mono', ui-monospace, monospace;
+  /*
+   * The families are supplied by `next/font` in the root layout, which pins them
+   * to these variables. Naming a font here that nothing loads — the previous
+   * arrangement — silently falls through to whatever the operating system has,
+   * which for Arabic is usually a poor default.
+   *
+   * The fallbacks below are ordered for the case where the webfont genuinely
+   * fails: Segoe UI and Tahoma carry real Arabic on Windows, Geeza Pro on macOS,
+   * Noto on Linux and Android.
+   */
+  --font-sans:
+    var(--font-plex-arabic), 'Segoe UI', 'Tahoma', 'Geeza Pro', 'Noto Sans Arabic',
+    system-ui, sans-serif;
+  --font-mono:
+    var(--font-plex-mono), ui-monospace, 'SF Mono', 'Cascadia Mono', 'Consolas', monospace;
 }
 
 :root[data-theme='dark'],
@@ -104,7 +117,14 @@
 
   body {
     @apply bg-background text-foreground antialiased;
-    font-feature-settings: 'cv02', 'cv03', 'cv04';
+    /*
+     * Kerning, standard ligatures and contextual alternates. The last is not
+     * optional for Arabic: `calt` is what drives contextual letterforms, so
+     * turning it off would break the script's joining behaviour outright.
+     * (The previous value listed Inter's `cv02`/`cv03` character variants,
+     * which mean nothing to any font this application actually loads.)
+     */
+    font-feature-settings: 'kern' 1, 'liga' 1, 'calt' 1;
     text-rendering: optimizeLegibility;
   }
 
