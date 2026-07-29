@@ -2,9 +2,11 @@ import {
   SCALE,
   absScaled,
   allocateScaled,
+  applyRateScaled,
   divideScaled,
   formatScaled,
   multiplyScaled,
+  parseRate,
   parseScaled,
   rescale,
   type RoundingMode,
@@ -192,9 +194,21 @@ export class Money {
    * Converts to another currency at an explicit rate. There is deliberately no
    * default rate and no ambient rate lookup: a conversion is always a decision
    * someone made, recorded with the rate that was used.
+   *
+   * The rate is parsed at scale 6 rather than 4, matching the DECIMAL(19,6)
+   * column it comes from — a rate like 0.025431 is ordinary, and rounding it to
+   * four places would move a large invoice by a visible amount.
    */
   convertTo(currency: CurrencyCode, rate: string | number, mode: RoundingMode = 'HALF_UP'): Money {
-    return new Money(multiplyScaled(this.scaled, parseScaled(rate), mode), normaliseCurrency(currency));
+    return new Money(
+      applyRateScaled(this.scaled, parseRate(rate), mode),
+      normaliseCurrency(currency),
+    );
+  }
+
+  /** Applies a scale-6 rate without changing the currency (revaluation, indexation). */
+  applyRate(rate: string | number, mode: RoundingMode = 'HALF_UP'): Money {
+    return new Money(applyRateScaled(this.scaled, parseRate(rate), mode), this.currency);
   }
 
   /** The raw scale-4 integer, for persistence and for the test suite. */

@@ -284,3 +284,72 @@ export function allocateScaled(total: bigint, weights: readonly bigint[]): bigin
 export function absScaled(value: bigint): bigint {
   return value < 0n ? -value : value;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Exchange rates — scale 6
+//
+//  Rates need more precision than amounts: JPY/SAR is 0.025431, and rounding
+//  that to four places moves a million-yen invoice by several riyals. They are
+//  stored as DECIMAL(19,6) and handled here at a matching scale, rather than
+//  being squeezed through the scale-4 path, which would reject a perfectly
+//  legitimate six-decimal rate outright.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Decimal digits retained for an exchange rate. */
+export const RATE_SCALE = 6;
+
+/** 10 ** RATE_SCALE. */
+export const RATE_FACTOR = 1_000_000n;
+
+const RATE_PATTERN = /^([+-]?)(\d*)(?:\.(\d*))?$/;
+
+/** Parses an exchange rate string into a scale-6 integer. */
+export function parseRate(input: string | number): bigint {
+  const raw = typeof input === 'number' ? input.toFixed(RATE_SCALE) : input.trim();
+
+  const match = RATE_PATTERN.exec(raw);
+  if (match === null || (match[2] ?? '') === '' && (match[3] ?? '') === '') {
+    throw new DecimalParseError(raw, 'it is not a plain decimal number');
+  }
+
+  const sign = match[1] === '-' ? -1n : 1n;
+  const integerPart = match[2] ?? '';
+  const fractionPart = match[3] ?? '';
+
+  if (fractionPart.length > RATE_SCALE) {
+    const excess = fractionPart.slice(RATE_SCALE);
+    if (/[^0]/.test(excess)) {
+      throw new DecimalParseError(
+        raw,
+        `an exchange rate may carry at most ${RATE_SCALE} decimal places`,
+      );
+    }
+  }
+
+  const normalisedFraction = fractionPart.slice(0, RATE_SCALE).padEnd(RATE_SCALE, '0');
+  return sign * BigInt(`${integerPart === '' ? '0' : integerPart}${normalisedFraction}`);
+}
+
+/**
+ * Applies a scale-6 rate to a scale-4 amount, returning a scale-4 amount.
+ *
+ * The intermediate product is scale 10 and held exactly in a bigint, so the
+ * conversion rounds exactly once — at the end — rather than accumulating error
+ * through the multiplication.
+ */
+export function applyRateScaled(
+  amount: bigint,
+  rate: bigint,
+  mode: RoundingMode = 'HALF_UP',
+): bigint {
+  return guardRange(divideRounded(amount * rate, RATE_FACTOR, mode));
+}
+
+/** Renders a scale-6 rate as a decimal string. */
+export function formatRate(rate: bigint): string {
+  const negative = rate < 0n;
+  const digits = (negative ? -rate : rate).toString().padStart(RATE_SCALE + 1, '0');
+  const integerPart = digits.slice(0, digits.length - RATE_SCALE);
+  const fractionPart = digits.slice(digits.length - RATE_SCALE);
+  return `${negative ? '-' : ''}${integerPart}.${fractionPart}`;
+}

@@ -70,7 +70,12 @@ export async function withTransaction<T>(
   work: (tx: TransactionClient) => Promise<T>,
   options: { maxRetries?: number; timeoutMs?: number } = {},
 ): Promise<T> {
-  const maxRetries = options.maxRetries ?? 3;
+  // Five, not three. Serialisation failures are not rare events to be tolerated
+  // once or twice — under contention on a hot row (a document-number counter,
+  // say) a dozen writers can collide in the same instant, and each retry round
+  // only thins the field. Too small a budget turns ordinary contention into a
+  // user-visible error.
+  const maxRetries = options.maxRetries ?? 5;
   const timeoutMs = options.timeoutMs ?? 15_000;
 
   let lastError: unknown;
@@ -87,9 +92,12 @@ export async function withTransaction<T>(
       if (!isRetryableTransactionError(error) || attempt === maxRetries) {
         throw error;
       }
-      // Exponential backoff with jitter, so retrying contenders do not
-      // synchronise and collide again at the same instant.
-      const backoff = 2 ** attempt * 25 + Math.random() * 25;
+      // Exponential backoff with full jitter, so retrying contenders do not
+      // synchronise and collide again at the same instant. Full jitter (rather
+      // than a fixed delay plus noise) is what actually decorrelates a thundering
+      // herd: the spread grows with the backoff window.
+      const ceiling = 2 ** attempt * 20;
+      const backoff = 5 + Math.random() * ceiling;
       await sleep(backoff);
     }
   }

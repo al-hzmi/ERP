@@ -100,6 +100,22 @@ const ACTION_LABELS: Record<string, { ar: string; en: string }> = {
   export: { ar: 'التصدير', en: 'export' },
 };
 
+/** Fields that are hidden unless explicitly granted. Enforced by the API serialisers. */
+export const FIELD_LEVEL_PROTECTED: Record<string, readonly string[]> = {
+  'inventory.product': ['costPrice'],
+  'hr.employee': ['basicSalary', 'nationalIdEnc', 'ibanEnc'],
+  'sales.customer': ['creditLimit'],
+};
+
+/**
+ * True when this field is one the system withholds unless it has been granted
+ * by name. Keeping the list in one place means adding a sensitive column is a
+ * one-line change rather than an audit of every call site.
+ */
+function isProtectedField(resource: string, field: string): boolean {
+  return FIELD_LEVEL_PROTECTED[resource]?.includes(field) ?? false;
+}
+
 /**
  * An immutable snapshot of everything a user is allowed to do.
  *
@@ -117,27 +133,30 @@ export class PermissionSet {
   }
 
   /**
-   * Answers whether the user may perform `action` on `resource`.
+   * Answers whether the user may perform `action` on `resource`, optionally on a
+   * specific field.
    *
-   * A field-scoped grant (`inventory.product:read:costPrice`) satisfies a
-   * field-scoped question. A resource-wide grant satisfies both. Asking about a
-   * field the user has no resource-level access to fails, as it should.
+   * The rule for fields is what makes field-level control real: a field listed in
+   * `FIELD_LEVEL_PROTECTED` requires an **explicit** grant. Letting the ordinary
+   * `inventory.product:read` grant also cover `costPrice` would make every
+   * field-level permission decorative — which is the usual way this feature is
+   * implemented and the reason it never protects anything. Unprotected fields
+   * fall back to resource-level access, so callers can pass a field name freely.
    */
   can(resource: string, action: string, field?: string): boolean {
     if (this.isSuperAdmin) return true;
 
-    const candidates = [
-      `${resource}:${action}`,
-      `${resource}:*`,
-      `*:${action}`,
-      '*:*',
-    ];
-
-    if (field !== undefined) {
-      candidates.unshift(`${resource}:${action}:${field}`, `${resource}:*:${field}`);
+    if (field !== undefined && isProtectedField(resource, field)) {
+      return [
+        `${resource}:${action}:${field}`,
+        `${resource}:*:${field}`,
+        '*:*',
+      ].some((candidate) => this.granted.has(candidate));
     }
 
-    return candidates.some((candidate) => this.granted.has(candidate));
+    return [`${resource}:${action}`, `${resource}:*`, `*:${action}`, '*:*'].some((candidate) =>
+      this.granted.has(candidate),
+    );
   }
 
   /** `can`, expressed as a Result so a use case can `if (!x.ok) return x`. */
@@ -159,11 +178,16 @@ export class PermissionSet {
 
   /**
    * Fields of `resource` the user may NOT see, given a candidate list.
-   * Used to strip columns from an API response rather than to refuse it wholesale.
+   *
+   * Used to strip columns from an API response rather than to refuse the whole
+   * request: a salesperson should still be able to open a product, just without
+   * seeing what it cost us.
    */
   deniedFields(resource: string, fields: readonly string[]): string[] {
     if (this.isSuperAdmin) return [];
-    return fields.filter((field) => !this.can(resource, 'read', field));
+    return fields.filter(
+      (field) => isProtectedField(resource, field) && !this.can(resource, 'read', field),
+    );
   }
 
   get size(): number {
@@ -325,9 +349,3 @@ export function expandPermissionCatalogue(): { resource: string; action: string;
   return rows;
 }
 
-/** Fields that are hidden unless explicitly granted. Enforced by the API serialisers. */
-export const FIELD_LEVEL_PROTECTED: Record<string, readonly string[]> = {
-  'inventory.product': ['costPrice'],
-  'hr.employee': ['basicSalary', 'nationalIdEnc', 'ibanEnc'],
-  'sales.customer': ['creditLimit'],
-};
