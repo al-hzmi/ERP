@@ -1,0 +1,253 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Design tokens.
+ *
+ * Declared as HSL channel triplets rather than finished colours so Tailwind can
+ * apply opacity to any of them (`bg-primary/10`) without a second variable.
+ * Every colour the interface uses comes from here — there are no hard-coded
+ * hex values in components, which is what makes a tenant re-brand a change to
+ * this file alone.
+ */
+
+:root {
+  --background: 0 0% 100%;
+  --foreground: 222 25% 12%;
+
+  --card: 0 0% 100%;
+  --card-foreground: 222 25% 12%;
+
+  --popover: 0 0% 100%;
+  --popover-foreground: 222 25% 12%;
+
+  /* A deep teal-green: reads as institutional and financial without being the
+     default corporate blue every ERP already uses. */
+  --primary: 172 62% 26%;
+  --primary-foreground: 160 40% 98%;
+
+  --secondary: 210 20% 96%;
+  --secondary-foreground: 222 25% 20%;
+
+  --muted: 210 20% 96%;
+  --muted-foreground: 215 16% 45%;
+
+  --accent: 172 45% 94%;
+  --accent-foreground: 172 62% 20%;
+
+  --destructive: 0 72% 45%;
+  --destructive-foreground: 0 0% 100%;
+
+  --success: 152 55% 34%;
+  --success-foreground: 0 0% 100%;
+
+  --warning: 38 92% 45%;
+  --warning-foreground: 30 40% 12%;
+
+  --border: 214 20% 89%;
+  --input: 214 20% 89%;
+  --ring: 172 62% 32%;
+
+  --radius: 0.625rem;
+
+  /*
+   * The families are supplied by `next/font` in the root layout, which pins them
+   * to these variables. Naming a font here that nothing loads — the previous
+   * arrangement — silently falls through to whatever the operating system has,
+   * which for Arabic is usually a poor default.
+   *
+   * The fallbacks below are ordered for the case where the webfont genuinely
+   * fails: Segoe UI and Tahoma carry real Arabic on Windows, Geeza Pro on macOS,
+   * Noto on Linux and Android.
+   */
+  --font-sans:
+    var(--font-plex-arabic), 'Segoe UI', 'Tahoma', 'Geeza Pro', 'Noto Sans Arabic',
+    system-ui, sans-serif;
+  --font-mono:
+    var(--font-plex-mono), ui-monospace, 'SF Mono', 'Cascadia Mono', 'Consolas', monospace;
+}
+
+:root[data-theme='dark'],
+.dark {
+  --background: 222 30% 8%;
+  --foreground: 210 20% 96%;
+
+  --card: 222 26% 11%;
+  --card-foreground: 210 20% 96%;
+
+  --popover: 222 26% 11%;
+  --popover-foreground: 210 20% 96%;
+
+  --primary: 172 55% 45%;
+  --primary-foreground: 222 30% 8%;
+
+  --secondary: 222 20% 17%;
+  --secondary-foreground: 210 20% 96%;
+
+  --muted: 222 20% 17%;
+  --muted-foreground: 215 16% 62%;
+
+  --accent: 172 40% 18%;
+  --accent-foreground: 172 55% 80%;
+
+  --destructive: 0 62% 52%;
+  --destructive-foreground: 0 0% 100%;
+
+  --success: 152 45% 45%;
+  --success-foreground: 0 0% 100%;
+
+  --warning: 38 85% 55%;
+  --warning-foreground: 30 40% 10%;
+
+  --border: 222 18% 22%;
+  --input: 222 18% 22%;
+  --ring: 172 55% 45%;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    /* Prevents the layout shifting sideways when a long page appears. */
+    scrollbar-gutter: stable;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    /*
+     * Kerning, standard ligatures and contextual alternates. The last is not
+     * optional for Arabic: `calt` is what drives contextual letterforms, so
+     * turning it off would break the script's joining behaviour outright.
+     * (The previous value listed Inter's `cv02`/`cv03` character variants,
+     * which mean nothing to any font this application actually loads.)
+     */
+    font-feature-settings: 'kern' 1, 'liga' 1, 'calt' 1;
+    text-rendering: optimizeLegibility;
+  }
+
+  /*
+   * Every numeric cell uses tabular figures.
+   *
+   * In a proportional font the digit 1 is narrower than 8, so a column of
+   * amounts visibly jitters as it updates and the decimal points do not line
+   * up — which is the difference between a table an accountant can scan and one
+   * they have to read.
+   */
+  .numeric,
+  td.numeric,
+  th.numeric {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum';
+    /* Amounts are read right-aligned regardless of the page's text direction. */
+    direction: ltr;
+    text-align: end;
+  }
+
+  /*
+   * Isolates a Latin fragment inside Arabic text.
+   *
+   * Without this, an invoice number like INV-2026-00001 sitting in an Arabic
+   * sentence gets reordered by the bidirectional algorithm and renders as
+   * 00001-2026-INV. `unicode-bidi: isolate` scopes the algorithm to the span.
+   */
+  .bidi-isolate {
+    unicode-bidi: isolate;
+    direction: ltr;
+    display: inline-block;
+  }
+
+  :focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+
+  /* Respect a user who has asked the system for less motion. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  .card-surface {
+    @apply rounded-lg border border-border bg-card text-card-foreground shadow-sm;
+  }
+
+  .data-table {
+    @apply w-full border-collapse text-sm;
+  }
+
+  .data-table thead th {
+    @apply sticky top-0 z-10 whitespace-nowrap border-b border-border bg-muted/60
+           px-4 py-3 text-start text-xs font-semibold uppercase tracking-wide
+           text-muted-foreground backdrop-blur;
+  }
+
+  .data-table tbody td {
+    @apply border-b border-border/60 px-4 py-3 align-middle;
+  }
+
+  .data-table tbody tr {
+    @apply transition-colors hover:bg-accent/40;
+  }
+
+  /* A skeleton that shimmers in the reading direction of the page. */
+  .skeleton {
+    @apply relative overflow-hidden rounded bg-muted;
+  }
+
+  .skeleton::after {
+    @apply absolute inset-0 animate-shimmer;
+    content: '';
+    background-image: linear-gradient(
+      90deg,
+      transparent,
+      hsl(var(--foreground) / 0.06),
+      transparent
+    );
+    transform: translateX(-100%);
+  }
+}
+
+/*
+ * RTL is the default, not an afterthought.
+ *
+ * Tailwind's logical properties (ps-, pe-, ms-, me-, text-start, text-end) do
+ * the heavy lifting; these rules handle the few cases with no logical
+ * equivalent.
+ */
+[dir='rtl'] .flip-in-rtl {
+  transform: scaleX(-1);
+}
+
+[dir='rtl'] .data-table thead th,
+[dir='rtl'] .data-table tbody td {
+  text-align: right;
+}
+
+[dir='rtl'] .numeric {
+  text-align: left;
+}
+
+/* Print: the invoice must come out clean, without the application around it. */
+@media print {
+  .no-print {
+    display: none !important;
+  }
+
+  body {
+    @apply bg-white text-black;
+  }
+
+  .card-surface {
+    @apply border border-black/20 shadow-none;
+  }
+}
