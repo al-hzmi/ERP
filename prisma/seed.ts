@@ -1033,13 +1033,18 @@ async function postOpeningBalances(
       functionalCurrency: FUNCTIONAL_CURRENCY,
     });
 
-    draft.debit(cash, Money.of('2500000.00', FUNCTIONAL_CURRENCY), {
+    // Sized to the trading volume the generator goes on to produce. A company
+    // that will carry ~100M of inventory and settle ~80M of purchases cannot be
+    // funded with 15M of capital — the ledger would still balance, but the demo
+    // would show a solvent business running a large negative cash position,
+    // which reads as a bug even though the arithmetic is sound.
+    draft.debit(cash, Money.of('25000000.00', FUNCTIONAL_CURRENCY), {
       description: 'رصيد افتتاحي - الصندوق',
     });
-    draft.debit(bank, Money.of('12500000.00', FUNCTIONAL_CURRENCY), {
+    draft.debit(bank, Money.of('125000000.00', FUNCTIONAL_CURRENCY), {
       description: 'رصيد افتتاحي - البنك',
     });
-    draft.credit(capital, Money.of('15000000.00', FUNCTIONAL_CURRENCY), {
+    draft.credit(capital, Money.of('150000000.00', FUNCTIONAL_CURRENCY), {
       description: 'رأس المال المدفوع',
     });
 
@@ -1055,7 +1060,7 @@ async function postOpeningBalances(
     if (!posted.ok) throw new Error(posted.error.messageEn);
   });
 
-  log('Opening balances posted', 'SAR 15,000,000 capital');
+  log('Opening balances posted', 'SAR 150,000,000 capital');
 }
 
 function auditFrom(context: RequestContext) {

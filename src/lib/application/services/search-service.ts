@@ -191,9 +191,17 @@ async function searchCounterparties(
     SELECT c."id", c."code", c."nameAr", c."nameEn", c."phone", c."type"::text AS type,
            GREATEST(
              ${scoreExpression(Prisma.sql`c."code"`, Prisma.sql`c."nameAr"`, Prisma.sql`c."nameEn"`, term)},
-             CASE WHEN c."phone"     ILIKE ${'%' + term + '%'} THEN 0.75 ELSE 0 END,
+             -- An exact tax or phone number is strong evidence; a short substring
+             -- of a 15-digit VAT number is weak, and must not outrank a genuine
+             -- code match. Someone typing "1001" wants BTC-1001, not the customer
+             -- whose VAT registration happens to contain those digits.
+             CASE WHEN c."taxNumber" = ${term}                 THEN 1.00 ELSE 0 END,
+             CASE WHEN c."phone"     = ${term}                 THEN 1.00 ELSE 0 END,
+             CASE WHEN c."phone"     ILIKE ${term + '%'}       THEN 0.82 ELSE 0 END,
+             CASE WHEN c."taxNumber" ILIKE ${term + '%'}       THEN 0.82 ELSE 0 END,
              CASE WHEN c."email"     ILIKE ${'%' + term + '%'} THEN 0.72 ELSE 0 END,
-             CASE WHEN c."taxNumber" ILIKE ${'%' + term + '%'} THEN 0.88 ELSE 0 END
+             CASE WHEN c."phone"     ILIKE ${'%' + term + '%'} THEN 0.66 ELSE 0 END,
+             CASE WHEN c."taxNumber" ILIKE ${'%' + term + '%'} THEN 0.64 ELSE 0 END
            )::float8 AS score
       FROM "counterparties" c
      WHERE c."tenantId" = ${tenantId}::uuid
