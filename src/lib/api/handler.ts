@@ -3,6 +3,7 @@ import { DomainError, DomainErrors } from '@/lib/domain/shared/errors';
 import type { Result } from '@/lib/domain/shared/result';
 import { getRequestContext, type RequestContext } from '@/lib/infrastructure/auth/request-context';
 import { serialiseForJson } from '@/lib/infrastructure/db/decimal-mapper';
+import { runInTenantScope } from '@/lib/infrastructure/db/tenant-scope';
 import { logger } from '@/lib/infrastructure/logging/logger';
 import {
   checkRateLimit,
@@ -100,7 +101,17 @@ export function apiHandler<T>(handler: Handler<T>, options: HandlerOptions = {})
         }
       }
 
-      const result = await handler(context, request);
+      // Everything the handler awaits — services, use cases, transactions —
+      // runs inside this scope, so the tenant reaches the database session
+      // without being threaded through as a parameter nobody may omit.
+      const result = await runInTenantScope(
+        {
+          tenantId: context.tenantId,
+          userId: context.userId,
+          correlationId: context.correlationId,
+        },
+        () => handler(context, request),
+      );
 
       if (!result.ok) {
         return failure(result.error, rateLimitHeaders(limit));
