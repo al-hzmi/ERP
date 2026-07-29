@@ -124,6 +124,20 @@ export type TransactionClient = Omit<
   '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'
 >;
 
+/**
+ * A client that can only issue raw queries.
+ *
+ * Read-only services written entirely in `$queryRaw` — the reports and the
+ * search — need to run both inside a transaction and standalone against the
+ * extended client. `TransactionClient` cannot express that: it is derived from
+ * the unextended `PrismaClient`, so the model delegates it carries are typed
+ * against different generic arguments than the extended client's and the two
+ * are not assignable. Asking only for `$queryRaw`, which `$extends` leaves
+ * untouched, is satisfied by either one and states what these services actually
+ * use.
+ */
+export type RawQueryClient = Pick<TransactionClient, '$queryRaw'>;
+
 export interface TransactionOptions {
   readonly maxRetries?: number;
   readonly timeoutMs?: number;

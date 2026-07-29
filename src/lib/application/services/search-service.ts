@@ -1,5 +1,5 @@
 import { Prisma } from '@prisma/client';
-import type { TransactionClient } from '@/lib/infrastructure/db/prisma';
+import type { RawQueryClient } from '@/lib/infrastructure/db/prisma';
 import { prisma } from '@/lib/infrastructure/db/prisma';
 
 /**
@@ -81,7 +81,7 @@ export async function search(options: SearchOptions): Promise<SearchHit[]> {
 }
 
 async function searchEntity(
-  db: TransactionClient,
+  db: RawQueryClient,
   entity: SearchEntity,
   term: string,
   tenantId: string,
@@ -130,7 +130,7 @@ function scoreExpression(codeColumn: Prisma.Sql, nameArColumn: Prisma.Sql, nameE
 }
 
 async function searchProducts(
-  db: TransactionClient,
+  db: RawQueryClient,
   term: string,
   tenantId: string,
   limit: number,
@@ -171,7 +171,7 @@ async function searchProducts(
 }
 
 async function searchCounterparties(
-  db: TransactionClient,
+  db: RawQueryClient,
   term: string,
   tenantId: string,
   limit: number,
@@ -236,7 +236,7 @@ async function searchCounterparties(
 }
 
 async function searchAccounts(
-  db: TransactionClient,
+  db: RawQueryClient,
   term: string,
   tenantId: string,
   limit: number,
@@ -273,7 +273,7 @@ async function searchAccounts(
 }
 
 async function searchDocuments(
-  db: TransactionClient,
+  db: RawQueryClient,
   term: string,
   tenantId: string,
   limit: number,
@@ -325,7 +325,7 @@ async function searchDocuments(
 }
 
 async function searchEmployees(
-  db: TransactionClient,
+  db: RawQueryClient,
   term: string,
   tenantId: string,
   limit: number,
