@@ -62,8 +62,18 @@ class EventBus {
   async enqueue(tx: TransactionClient, events: readonly DomainEvent[]): Promise<void> {
     if (events.length === 0) return;
 
+    // A use case that composes several services can end up holding the same
+    // event twice — once from the service that raised it and once from its own
+    // accumulated batch. Publishing it twice would run every subscriber twice;
+    // failing the insert on the primary key would abort an otherwise valid
+    // business transaction. Collapsing by event id is the only sane outcome.
+    const unique = new Map<string, DomainEvent>();
+    for (const event of events) {
+      unique.set(event.eventId, event);
+    }
+
     await tx.outboxEvent.createMany({
-      data: events.map((event) => ({
+      data: [...unique.values()].map((event) => ({
         id: event.eventId,
         tenantId: event.metadata.tenantId,
         eventType: event.eventType,

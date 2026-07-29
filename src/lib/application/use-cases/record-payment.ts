@@ -277,7 +277,8 @@ async function execute(
     postImmediately: true,
   });
   if (!journal.ok) return journal;
-  events.push(...journal.value.events);
+  // `persistJournalEntry` publishes `finance.journal.posted` itself — adding it
+  // here again would enqueue the same event id twice.
 
   await tx.payment.update({
     where: { id: payment.id },

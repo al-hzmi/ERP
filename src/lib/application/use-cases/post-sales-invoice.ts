@@ -294,7 +294,8 @@ async function execute(
   });
 
   if (!journal.ok) return journal;
-  events.push(...journal.value.events);
+  // `persistJournalEntry` publishes `finance.journal.posted` itself — adding it
+  // here again would enqueue the same event id twice.
 
   // ── 6. Flip the document and move the receivable ──────────────────────────
   await tx.document.update({

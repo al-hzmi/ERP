@@ -491,6 +491,11 @@ model Account {
   isPostable  Boolean       @default(true)
   /// Control accounts are maintained exclusively by sub-ledgers (AR/AP/Inventory).
   isControl   Boolean       @default(false)
+  /// A contra account sits under its parent's type but carries the opposite
+  /// nature — accumulated depreciation (an ASSET with a CREDIT nature), sales
+  /// returns and discounts allowed (REVENUE with a DEBIT nature). Modelling them
+  /// as their own type would misclassify them on the face of the statements.
+  isContra    Boolean       @default(false)
   currency    String?       @db.Char(3)
   /// Cached balance in functional currency, maintained by a DB trigger on posting.
   balance     Decimal       @default(0) @db.Decimal(19, 4)

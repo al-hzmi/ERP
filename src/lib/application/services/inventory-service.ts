@@ -105,6 +105,14 @@ export interface MovementIdentity {
   readonly referenceType?: string;
   readonly referenceId?: string;
   readonly notes?: string;
+  /**
+   * Transfer linkage. Set on the INSERT rather than stamped on afterwards: the
+   * movement ledger is append-only at the database level, so there is no
+   * "afterwards" in which to correct a row.
+   */
+  readonly transferGroupId?: string;
+  readonly fromWarehouseId?: string;
+  readonly toWarehouseId?: string;
 }
 
 export interface ReceiveStockInput extends MovementIdentity {
@@ -187,6 +195,9 @@ export async function receiveStock(
       serialNumber: input.serialNumber ?? null,
       expiryDate: input.expiryDate?.toDate() ?? null,
       notes: input.notes ?? null,
+      transferGroupId: input.transferGroupId ?? null,
+      fromWarehouseId: input.fromWarehouseId ?? null,
+      toWarehouseId: input.toWarehouseId ?? null,
       createdById: input.createdById,
     },
     select: { id: true },
@@ -357,6 +368,9 @@ export async function issueStock(
       batchNumber: input.batchNumber ?? null,
       serialNumber: input.serialNumber ?? null,
       notes: input.notes ?? null,
+      transferGroupId: input.transferGroupId ?? null,
+      fromWarehouseId: input.fromWarehouseId ?? null,
+      toWarehouseId: input.toWarehouseId ?? null,
       createdById: input.createdById,
     },
     select: { id: true },
@@ -470,6 +484,7 @@ export async function transferStock(
     warehouseNameEn: input.fromWarehouseNameEn,
     referenceType: input.referenceType ?? 'STOCK_TRANSFER',
     referenceId: input.referenceId ?? transferGroupId,
+    transferGroupId,
   });
 
   if (!issued.ok) return issued;
@@ -483,19 +498,10 @@ export async function transferStock(
     movementType: 'IN',
     referenceType: input.referenceType ?? 'STOCK_TRANSFER',
     referenceId: input.referenceId ?? transferGroupId,
+    transferGroupId,
   });
 
   if (!received.ok) return received;
-
-  // Stamp both legs so the pair is discoverable from either end.
-  await tx.$executeRaw`
-    UPDATE "inventory_movements"
-       SET "transferGroupId" = ${transferGroupId}::uuid,
-           "fromWarehouseId" = ${input.fromWarehouseId}::uuid,
-           "toWarehouseId"   = ${input.toWarehouseId}::uuid
-     WHERE "id" IN (${issued.value.movementId}::uuid, ${received.value.movementId}::uuid)
-       AND "movementDate" = ${input.date.toDate()}::date
-  `;
 
   return ok({
     transferGroupId,
