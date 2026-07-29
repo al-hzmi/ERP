@@ -1,0 +1,1465 @@
+// ─────────────────────────────────────────────────────────────────────────────
+//  Enterprise ERP — PostgreSQL Schema
+//
+//  Design rules enforced throughout this file:
+//   1. NO floating point for monetary or quantity values. Every amount is
+//      `Decimal @db.Decimal(19, 4)`; exchange rates use `Decimal(19, 6)`.
+//   2. Every foreign key declares an explicit onDelete / onUpdate policy.
+//      Financial history uses Restrict — accounting records are never cascaded away.
+//   3. Immutable ledgers (Journal, JournalLine, AuditLog, InventoryMovement) are
+//      protected by database triggers created in the SQL migration, not only by
+//      application code.
+//   4. Multi-tenancy readiness: every business table carries `tenantId`. Row Level
+//      Security policies are installed by the SQL migration.
+//   5. Large, append-only tables are declaratively partitioned by range on their
+//      time column (see migration `20260101000001_partitioning_and_extensions`).
+// ─────────────────────────────────────────────────────────────────────────────
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  directUrl  = env("DIRECT_URL")
+  extensions = [pg_trgm, btree_gin, uuid_ossp(map: "uuid-ossp")]
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  BOUNDED CONTEXT: PLATFORM  (tenancy, identity, access control, audit)
+// ═════════════════════════════════════════════════════════════════════════════
+
+model Tenant {
+  id                  String   @id @default(uuid()) @db.Uuid
+  code                String   @unique @db.VarChar(32)
+  nameAr              String   @db.VarChar(256)
+  nameEn              String   @db.VarChar(256)
+  /// Reporting (functional) currency. All ledgers are stated in this currency.
+  functionalCurrency  String   @default("SAR") @db.Char(3)
+  /// VAT registration number issued by ZATCA (15 digits, starts and ends with 3).
+  vatNumber           String?  @db.VarChar(15)
+  /// Commercial Registration Number.
+  crn                 String?  @db.VarChar(20)
+  addressJson         Json     @default("{}")
+  timezone            String   @default("Asia/Riyadh") @db.VarChar(64)
+  /// Global inventory costing policy. Per-product override is allowed.
+  costingMethod       CostingMethod @default(WEIGHTED_AVERAGE)
+  /// When false, payments exceeding the outstanding balance are rejected outright.
+  allowOverpayment    Boolean  @default(false)
+  /// When false, any stock movement that would drive on-hand below zero is rejected.
+  allowNegativeStock  Boolean  @default(false)
+  /// Enforce Segregation of Duties across the document lifecycle.
+  enforceSoD          Boolean  @default(true)
+  isActive            Boolean  @default(true)
+  createdAt           DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt           DateTime @updatedAt @db.Timestamptz(6)
+
+  users               User[]
+  roles               Role[]
+  branches            Branch[]
+  warehouses          Warehouse[]
+  accounts            Account[]
+  fiscalYears         FiscalYear[]
+  currencies          Currency[]
+  exchangeRates       ExchangeRate[]
+  categories          Category[]
+  brands              Brand[]
+  unitsOfMeasure      UnitOfMeasure[]
+  products            Product[]
+  counterparties      Counterparty[]
+  documents           Document[]
+  journals            Journal[]
+  inventoryMovements  InventoryMovement[]
+  stockLevels         StockLevel[]
+  costLayers          CostLayer[]
+  payments            Payment[]
+  departments         Department[]
+  employees           Employee[]
+  payrollRuns         PayrollRun[]
+  auditLogs           AuditLog[]
+  numberSequences     NumberSequence[]
+  outboxEvents        OutboxEvent[]
+  costCenters         CostCenter[]
+  projects            Project[]
+  approvalPolicies    ApprovalPolicy[]
+  approvalRequests    ApprovalRequest[]
+  notifications       Notification[]
+  fixedAssets         FixedAsset[]
+  bankStatements      BankStatement[]
+
+  @@index([isActive])
+  @@map("tenants")
+}
+
+model User {
+  id               String    @id @default(uuid()) @db.Uuid
+  tenantId         String    @db.Uuid
+  username         String    @db.VarChar(64)
+  email            String    @db.VarChar(256)
+  /// bcrypt hash, cost factor 12. Never leaves the infrastructure layer.
+  passwordHash     String    @db.VarChar(72)
+  fullNameAr       String    @db.VarChar(256)
+  fullNameEn       String    @db.VarChar(256)
+  isActive         Boolean   @default(true)
+  isSuperAdmin     Boolean   @default(false)
+  defaultBranchId  String?   @db.Uuid
+  locale           String    @default("ar") @db.VarChar(8)
+  timezone         String    @default("Asia/Riyadh") @db.VarChar(64)
+  /// Preferred calendar for display: gregorian | hijri | both.
+  calendarPref     String    @default("both") @db.VarChar(16)
+  /// arabic-indic (١٢٣) vs western (123) numeral rendering.
+  numeralSystem    String    @default("western") @db.VarChar(16)
+  lastLoginAt      DateTime? @db.Timestamptz(6)
+  failedAttempts   Int       @default(0)
+  lockedUntil      DateTime? @db.Timestamptz(6)
+  passwordChangedAt DateTime @default(now()) @db.Timestamptz(6)
+  createdAt        DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime  @updatedAt @db.Timestamptz(6)
+
+  tenant           Tenant       @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  defaultBranch    Branch?      @relation("UserDefaultBranch", fields: [defaultBranchId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  userRoles        UserRole[]
+  refreshTokens    RefreshToken[]
+  auditLogs        AuditLog[]
+  notifications    Notification[]
+
+  createdDocuments  Document[] @relation("DocumentCreatedBy")
+  postedDocuments   Document[] @relation("DocumentPostedBy")
+  approvedDocuments Document[] @relation("DocumentApprovedBy")
+  createdJournals   Journal[]  @relation("JournalCreatedBy")
+  postedJournals    Journal[]  @relation("JournalPostedBy")
+  createdPayments   Payment[]  @relation("PaymentCreatedBy")
+  postedPayments    Payment[]  @relation("PaymentPostedBy")
+  approvalActions   ApprovalAction[]
+
+  @@unique([tenantId, username])
+  @@unique([tenantId, email])
+  @@index([tenantId, isActive])
+  @@map("users")
+}
+
+model RefreshToken {
+  id          String    @id @default(uuid()) @db.Uuid
+  userId      String    @db.Uuid
+  /// SHA-256 of the opaque token. The raw token is never persisted.
+  tokenHash   String    @unique @db.Char(64)
+  /// Rotation family — revoking one member revokes the whole chain (reuse detection).
+  familyId    String    @db.Uuid
+  expiresAt   DateTime  @db.Timestamptz(6)
+  revokedAt   DateTime? @db.Timestamptz(6)
+  /// Set when this token was rotated into a successor. Presenting it again is a replay.
+  replacedById String?  @db.Uuid
+  ipAddress   String?   @db.VarChar(64)
+  userAgent   String?   @db.VarChar(512)
+  createdAt   DateTime  @default(now()) @db.Timestamptz(6)
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([userId, revokedAt])
+  @@index([familyId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+model Role {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @db.Uuid
+  name        String   @db.VarChar(64)
+  nameAr      String   @db.VarChar(128)
+  description String?  @db.VarChar(512)
+  /// System roles cannot be deleted or have their permission set emptied.
+  isSystem    Boolean  @default(false)
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(6)
+
+  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  userRoles       UserRole[]
+  rolePermissions RolePermission[]
+  approvalSteps   ApprovalStep[]
+
+  @@unique([tenantId, name])
+  @@map("roles")
+}
+
+model Permission {
+  id          String  @id @default(uuid()) @db.Uuid
+  /// Resource identifier, e.g. `sales.invoice`, `finance.journal`, `inventory.movement`.
+  resource    String  @db.VarChar(64)
+  /// Verb, e.g. `create`, `read`, `update`, `delete`, `post`, `void`, `approve`, `pay`.
+  action      String  @db.VarChar(32)
+  /// Optional field-level scope, e.g. `costPrice`. NULL = whole resource.
+  field       String? @db.VarChar(64)
+  description String? @db.VarChar(512)
+
+  rolePermissions RolePermission[]
+
+  @@unique([resource, action, field])
+  @@index([resource])
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String @db.Uuid
+  permissionId String @db.Uuid
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserRole {
+  userId String @db.Uuid
+  roleId String @db.Uuid
+  /// Optional branch scoping — the role only applies within this branch.
+  branchId String? @db.Uuid
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  role   Role    @relation(fields: [roleId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  branch Branch? @relation(fields: [branchId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@id([userId, roleId])
+  @@index([roleId])
+  @@map("user_roles")
+}
+
+/// Append-only. UPDATE and DELETE are blocked by a database trigger.
+/// Range-partitioned monthly on `timestamp`.
+model AuditLog {
+  id         String      @default(uuid()) @db.Uuid
+  tenantId   String      @db.Uuid
+  userId     String?     @db.Uuid
+  action     AuditAction
+  entityType String      @db.VarChar(64)
+  entityId   String      @db.VarChar(64)
+  fieldName  String?     @db.VarChar(64)
+  oldValue   String?
+  newValue   String?
+  /// Full before/after snapshot for CREATE and DELETE where per-field diffing is moot.
+  metadata   Json?
+  ipAddress  String?     @db.VarChar(64)
+  userAgent  String?     @db.VarChar(512)
+  sessionId  String?     @db.VarChar(64)
+  /// Correlates every row written by a single use-case execution.
+  correlationId String?  @db.Uuid
+  timestamp  DateTime    @default(now()) @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  user   User?  @relation(fields: [userId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@id([id, timestamp])
+  @@index([tenantId, entityType, entityId])
+  @@index([tenantId, userId, timestamp])
+  @@index([tenantId, timestamp])
+  @@index([correlationId])
+  @@map("audit_logs")
+}
+
+/// Transactional outbox. Domain events are committed in the same transaction as
+/// the state change, then dispatched asynchronously — no dual-write problem.
+model OutboxEvent {
+  id            String    @id @default(uuid()) @db.Uuid
+  tenantId      String    @db.Uuid
+  eventType     String    @db.VarChar(96)
+  aggregateType String    @db.VarChar(64)
+  aggregateId   String    @db.VarChar(64)
+  payload       Json
+  correlationId String?   @db.Uuid
+  causationId   String?   @db.Uuid
+  occurredAt    DateTime  @default(now()) @db.Timestamptz(6)
+  processedAt   DateTime? @db.Timestamptz(6)
+  attempts      Int       @default(0)
+  lastError     String?
+  /// Events that exhausted their retries land here for operator review.
+  deadLettered  Boolean   @default(false)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([processedAt, occurredAt])
+  @@index([tenantId, aggregateType, aggregateId])
+  @@index([eventType])
+  @@map("outbox_events")
+}
+
+/// Gap-free-by-design sequential numbering. A drafted-then-deleted document keeps
+/// its number burned (a gap) — numbers are never recycled, per audit requirements.
+model NumberSequence {
+  id           String   @id @default(uuid()) @db.Uuid
+  tenantId     String   @db.Uuid
+  /// Logical series key, e.g. `SALES_INVOICE`, `JOURNAL`, `RECEIPT_VOUCHER`.
+  key          String   @db.VarChar(64)
+  /// Fiscal year the counter belongs to; sequences reset per year.
+  year         Int
+  prefix       String   @db.VarChar(16)
+  /// Zero-padded width of the numeric part.
+  padding      Int      @default(5)
+  nextValue    BigInt   @default(1)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([tenantId, key, year])
+  @@map("number_sequences")
+}
+
+model Notification {
+  id         String    @id @default(uuid()) @db.Uuid
+  tenantId   String    @db.Uuid
+  userId     String    @db.Uuid
+  severity   String    @default("info") @db.VarChar(16)
+  titleAr    String    @db.VarChar(256)
+  titleEn    String    @db.VarChar(256)
+  bodyAr     String?
+  bodyEn     String?
+  link       String?   @db.VarChar(512)
+  readAt     DateTime? @db.Timestamptz(6)
+  createdAt  DateTime  @default(now()) @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([userId, readAt, createdAt])
+  @@map("notifications")
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  BOUNDED CONTEXT: ORGANISATION  (branches, warehouses, cost centres, projects)
+// ═════════════════════════════════════════════════════════════════════════════
+
+model Branch {
+  id                 String   @id @default(uuid()) @db.Uuid
+  tenantId           String   @db.Uuid
+  code               String   @db.VarChar(16)
+  nameAr             String   @db.VarChar(256)
+  nameEn             String   @db.VarChar(256)
+  city               String?  @db.VarChar(128)
+  addressJson        Json     @default("{}")
+  phone              String?  @db.VarChar(32)
+  defaultWarehouseId String?  @db.Uuid
+  /// Cash & bank GL accounts available to this branch: [{ accountId, label, isDefault }].
+  bankAccountsJson   Json     @default("[]")
+  isActive           Boolean  @default(true)
+  createdAt          DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime @updatedAt @db.Timestamptz(6)
+
+  tenant             Tenant              @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  defaultWarehouse   Warehouse?          @relation("BranchDefaultWarehouse", fields: [defaultWarehouseId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  warehouses         Warehouse[]         @relation("WarehouseBranch")
+  documents          Document[]
+  journals           Journal[]
+  inventoryMovements InventoryMovement[]
+  payments           Payment[]
+  employees          Employee[]
+  usersDefaulting    User[]              @relation("UserDefaultBranch")
+  userRoles          UserRole[]
+  fixedAssets        FixedAsset[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId, isActive])
+  @@map("branches")
+}
+
+model Warehouse {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @db.Uuid
+  branchId  String   @db.Uuid
+  code      String   @db.VarChar(16)
+  nameAr    String   @db.VarChar(256)
+  nameEn    String   @db.VarChar(256)
+  location  String?  @db.VarChar(256)
+  /// Quarantine warehouses hold received-but-unapproved goods; excluded from ATP.
+  isQuarantine Boolean @default(false)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  tenant             Tenant              @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  branch             Branch              @relation("WarehouseBranch", fields: [branchId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  branchesDefaulting Branch[]            @relation("BranchDefaultWarehouse")
+  documents          Document[]
+  stockLevels        StockLevel[]
+  costLayers         CostLayer[]
+  movements          InventoryMovement[] @relation("MovementWarehouse")
+  movementsFrom      InventoryMovement[] @relation("MovementFromWarehouse")
+  movementsTo        InventoryMovement[] @relation("MovementToWarehouse")
+
+  @@unique([tenantId, code])
+  @@index([tenantId, branchId, isActive])
+  @@map("warehouses")
+}
+
+model CostCenter {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @db.Uuid
+  code      String   @db.VarChar(32)
+  nameAr    String   @db.VarChar(256)
+  nameEn    String   @db.VarChar(256)
+  parentId  String?  @db.Uuid
+  isActive  Boolean  @default(true)
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  parent       CostCenter?   @relation("CostCenterTree", fields: [parentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  children     CostCenter[]  @relation("CostCenterTree")
+  journalLines JournalLine[]
+
+  @@unique([tenantId, code])
+  @@map("cost_centers")
+}
+
+model Project {
+  id        String    @id @default(uuid()) @db.Uuid
+  tenantId  String    @db.Uuid
+  code      String    @db.VarChar(32)
+  nameAr    String    @db.VarChar(256)
+  nameEn    String    @db.VarChar(256)
+  startDate DateTime? @db.Date
+  endDate   DateTime? @db.Date
+  budget    Decimal?  @db.Decimal(19, 4)
+  isActive  Boolean   @default(true)
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  journalLines JournalLine[]
+
+  @@unique([tenantId, code])
+  @@map("projects")
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  BOUNDED CONTEXT: FINANCIALS  (chart of accounts, fiscal calendar, ledger)
+// ═════════════════════════════════════════════════════════════════════════════
+
+model Currency {
+  id           String   @id @default(uuid()) @db.Uuid
+  tenantId     String   @db.Uuid
+  code         String   @db.Char(3)
+  nameAr       String   @db.VarChar(64)
+  nameEn       String   @db.VarChar(64)
+  symbol       String   @db.VarChar(8)
+  /// Number of minor-unit digits (SAR = 2, KWD = 3, JPY = 0).
+  minorUnits   Int      @default(2)
+  isFunctional Boolean  @default(false)
+  isActive     Boolean  @default(true)
+
+  tenant    Tenant         @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  ratesFrom ExchangeRate[] @relation("RateFrom")
+  ratesTo   ExchangeRate[] @relation("RateTo")
+
+  @@unique([tenantId, code])
+  @@map("currencies")
+}
+
+model ExchangeRate {
+  id             String   @id @default(uuid()) @db.Uuid
+  tenantId       String   @db.Uuid
+  fromCurrencyId String   @db.Uuid
+  toCurrencyId   String   @db.Uuid
+  /// Denormalised ISO codes so rate lookups never need to join `currencies`.
+  fromCurrency   String   @db.Char(3)
+  toCurrency     String   @db.Char(3)
+  /// 6 decimal places — sufficient for all ISO 4217 pairs without float error.
+  rate           Decimal  @db.Decimal(19, 6)
+  validOn        DateTime @db.Date
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+
+  tenant Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  from   Currency @relation("RateFrom", fields: [fromCurrencyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  to     Currency @relation("RateTo", fields: [toCurrencyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([tenantId, fromCurrency, toCurrency, validOn])
+  @@index([tenantId, validOn])
+  @@map("exchange_rates")
+}
+
+model Account {
+  id          String        @id @default(uuid()) @db.Uuid
+  tenantId    String        @db.Uuid
+  /// Immutable after creation — enforced in the domain layer and by trigger.
+  code        String        @db.VarChar(32)
+  nameAr      String        @db.VarChar(256)
+  nameEn      String        @db.VarChar(256)
+  type        AccountType
+  nature      AccountNature
+  parentId    String?       @db.Uuid
+  /// Materialised depth for fast tree rendering without recursive CTE on read.
+  level       Int           @default(0)
+  /// Dot-delimited materialised path (`1.12.1201`) — enables prefix range scans.
+  path        String        @db.VarChar(512)
+  /// Only leaf ("postable") accounts may appear on a journal line.
+  isPostable  Boolean       @default(true)
+  /// Control accounts are maintained exclusively by sub-ledgers (AR/AP/Inventory).
+  isControl   Boolean       @default(false)
+  currency    String?       @db.Char(3)
+  /// Cached balance in functional currency, maintained by a DB trigger on posting.
+  balance     Decimal       @default(0) @db.Decimal(19, 4)
+  isActive    Boolean       @default(true)
+  createdAt   DateTime      @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime      @updatedAt @db.Timestamptz(6)
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  parent       Account?      @relation("AccountTree", fields: [parentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  children     Account[]     @relation("AccountTree")
+  journalLines JournalLine[]
+  payments     Payment[]
+  mappings     AccountMapping[]
+  bankStatements BankStatement[]
+  assetsAsAsset       FixedAsset[] @relation("AssetAccount")
+  assetsAsAccum       FixedAsset[] @relation("AccumulatedDepreciationAccount")
+  assetsAsExpense     FixedAsset[] @relation("DepreciationExpenseAccount")
+
+  @@unique([tenantId, code])
+  @@index([tenantId, type, isActive])
+  @@index([tenantId, parentId])
+  @@index([tenantId, path])
+  @@map("accounts")
+}
+
+/// Resolves "which GL account does this business event hit?" without hard-coding
+/// account codes in the application layer. Optionally scoped by branch/category.
+model AccountMapping {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @db.Uuid
+  /// e.g. `AR_CONTROL`, `AP_CONTROL`, `VAT_OUTPUT`, `VAT_INPUT`, `SALES_REVENUE`,
+  /// `COGS`, `INVENTORY`, `SALES_DISCOUNT`, `INVENTORY_ADJUSTMENT`, `FX_GAIN`, `FX_LOSS`,
+  /// `SALARIES_EXPENSE`, `SALARIES_PAYABLE`, `ROUNDING_DIFFERENCE`.
+  key         String   @db.VarChar(64)
+  accountId   String   @db.Uuid
+  /// Optional narrowing scope; NULL means "tenant default".
+  branchId    String?  @db.Uuid
+  categoryId  String?  @db.Uuid
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([tenantId, key, branchId, categoryId])
+  @@index([tenantId, key])
+  @@map("account_mappings")
+}
+
+model FiscalYear {
+  id        String        @id @default(uuid()) @db.Uuid
+  tenantId  String        @db.Uuid
+  year      Int
+  startDate DateTime      @db.Date
+  endDate   DateTime      @db.Date
+  status    FiscalStatus  @default(OPEN)
+
+  tenant  Tenant         @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  periods FiscalPeriod[]
+
+  @@unique([tenantId, year])
+  @@map("fiscal_years")
+}
+
+model FiscalPeriod {
+  id           String       @id @default(uuid()) @db.Uuid
+  fiscalYearId String       @db.Uuid
+  /// 1..12 for calendar months; 13 reserved for year-end adjustments.
+  periodNumber Int
+  startDate    DateTime     @db.Date
+  endDate      DateTime     @db.Date
+  status       FiscalStatus @default(OPEN)
+
+  fiscalYear FiscalYear @relation(fields: [fiscalYearId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  journals   Journal[]
+
+  @@unique([fiscalYearId, periodNumber])
+  @@index([startDate, endDate])
+  @@map("fiscal_periods")
+}
+
+/// The general ledger header. Once `status = POSTED` it is immutable:
+/// UPDATE of financial columns and DELETE are blocked by trigger.
+/// Range-partitioned by `date` (yearly).
+model Journal {
+  id             String        @default(uuid()) @db.Uuid
+  tenantId       String        @db.Uuid
+  entryNumber    String        @db.VarChar(32)
+  type           JournalType
+  status         JournalStatus @default(DRAFT)
+  date           DateTime      @db.Date
+  branchId       String?       @db.Uuid
+  fiscalPeriodId String?       @db.Uuid
+  descriptionAr  String        @db.VarChar(512)
+  descriptionEn  String?       @db.VarChar(512)
+  /// Source document linkage (polymorphic by design — the sub-ledger owns the detail).
+  referenceType  String?       @db.VarChar(32)
+  referenceId    String?       @db.VarChar(64)
+  currency       String        @default("SAR") @db.Char(3)
+  exchangeRate   Decimal       @default(1) @db.Decimal(19, 6)
+  totalDebit     Decimal       @default(0) @db.Decimal(19, 4)
+  totalCredit    Decimal       @default(0) @db.Decimal(19, 4)
+  /// Set on the reversing entry to point at the journal it reverses.
+  reversesJournalId String?    @db.Uuid
+  isReversed     Boolean       @default(false)
+  createdById    String        @db.Uuid
+  postedById     String?       @db.Uuid
+  postedAt       DateTime?     @db.Timestamptz(6)
+  createdAt      DateTime      @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime      @updatedAt @db.Timestamptz(6)
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  branch       Branch?       @relation(fields: [branchId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  fiscalPeriod FiscalPeriod? @relation(fields: [fiscalPeriodId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  createdBy    User          @relation("JournalCreatedBy", fields: [createdById], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  postedBy     User?         @relation("JournalPostedBy", fields: [postedById], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lines        JournalLine[]
+
+  @@id([id, date])
+  @@unique([tenantId, entryNumber, date])
+  @@index([tenantId, date])
+  @@index([tenantId, status, date])
+  @@index([tenantId, referenceType, referenceId])
+  @@index([tenantId, type, date])
+  @@map("journals")
+}
+
+/// Check constraints (installed by migration):
+///   debit  >= 0
+///   credit >= 0
+///   (debit = 0) OR (credit = 0)     -- never both sides on one line
+///   (debit + credit) > 0            -- no zero-value lines
+model JournalLine {
+  id           String   @default(uuid()) @db.Uuid
+  tenantId     String   @db.Uuid
+  journalId    String   @db.Uuid
+  journalDate  DateTime @db.Date
+  lineNumber   Int
+  accountId    String   @db.Uuid
+  debit        Decimal  @default(0) @db.Decimal(19, 4)
+  credit       Decimal  @default(0) @db.Decimal(19, 4)
+  /// Amount in the transaction currency before conversion (for FX reporting).
+  foreignDebit  Decimal @default(0) @db.Decimal(19, 4)
+  foreignCredit Decimal @default(0) @db.Decimal(19, 4)
+  description  String?  @db.VarChar(512)
+  costCenterId String?  @db.Uuid
+  projectId    String?  @db.Uuid
+  /// Sub-ledger reconciliation key: which counterparty this AR/AP line belongs to.
+  counterpartyId String? @db.Uuid
+
+  journal      Journal      @relation(fields: [journalId, journalDate], references: [id, date], onDelete: Cascade, onUpdate: Cascade)
+  account      Account      @relation(fields: [accountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  costCenter   CostCenter?  @relation(fields: [costCenterId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  project      Project?     @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  counterparty Counterparty? @relation(fields: [counterpartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@id([id, journalDate])
+  @@index([journalId])
+  @@index([tenantId, accountId, journalDate])
+  @@index([tenantId, counterpartyId, journalDate])
+  @@map("journal_lines")
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  BOUNDED CONTEXT: MASTER DATA  (products, counterparties)
+// ═════════════════════════════════════════════════════════════════════════════
+
+model Category {
+  id       String  @id @default(uuid()) @db.Uuid
+  tenantId String  @db.Uuid
+  code     String  @db.VarChar(16)
+  nameAr   String  @db.VarChar(128)
+  nameEn   String  @db.VarChar(128)
+  parentId String? @db.Uuid
+  isActive Boolean @default(true)
+
+  tenant   Tenant     @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  children Category[] @relation("CategoryTree")
+  products Product[]
+
+  @@unique([tenantId, code])
+  @@map("categories")
+}
+
+model Brand {
+  id       String  @id @default(uuid()) @db.Uuid
+  tenantId String  @db.Uuid
+  nameAr   String  @db.VarChar(128)
+  nameEn   String  @db.VarChar(128)
+  isActive Boolean @default(true)
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  products Product[]
+
+  @@unique([tenantId, nameEn])
+  @@map("brands")
+}
+
+model UnitOfMeasure {
+  id           String  @id @default(uuid()) @db.Uuid
+  tenantId     String  @db.Uuid
+  code         String  @db.VarChar(16)
+  nameAr       String  @db.VarChar(64)
+  nameEn       String  @db.VarChar(64)
+  /// Conversion factor to the base UoM of the same family (e.g. BOX -> PCS = 12).
+  baseFactor   Decimal @default(1) @db.Decimal(19, 6)
+  isActive     Boolean @default(true)
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  products Product[]
+
+  @@unique([tenantId, code])
+  @@map("units_of_measure")
+}
+
+model Product {
+  id            String        @id @default(uuid()) @db.Uuid
+  tenantId      String        @db.Uuid
+  /// Format `CAT-NNNN`, e.g. `BTC-1001`. Unique per tenant, immutable.
+  sku           String        @db.VarChar(32)
+  nameAr        String        @db.VarChar(256)
+  nameEn        String        @db.VarChar(256)
+  description   String?       @db.VarChar(1024)
+  categoryId    String        @db.Uuid
+  brandId       String?       @db.Uuid
+  unitOfMeasureId String      @db.Uuid
+  salePrice     Decimal       @db.Decimal(19, 4)
+  costPrice     Decimal       @db.Decimal(19, 4)
+  /// VAT rate applied at line level. 15.00 = standard KSA rate; 0.00 = zero-rated.
+  taxRate       Decimal       @default(15) @db.Decimal(5, 2)
+  /// Overrides the tenant costing policy when set.
+  costingMethod CostingMethod?
+  trackExpiry   Boolean       @default(false)
+  trackSerial   Boolean       @default(false)
+  trackBatch    Boolean       @default(false)
+  /// Services are not stocked — no inventory movement, no COGS layer.
+  isStockItem   Boolean       @default(true)
+  reorderPoint  Decimal       @default(0) @db.Decimal(19, 4)
+  barcode       String?       @db.VarChar(64)
+  isActive      Boolean       @default(true)
+  createdAt     DateTime      @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime      @updatedAt @db.Timestamptz(6)
+
+  tenant        Tenant              @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  category      Category            @relation(fields: [categoryId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  brand         Brand?              @relation(fields: [brandId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  unitOfMeasure UnitOfMeasure       @relation(fields: [unitOfMeasureId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  documentLines DocumentLine[]
+  movements     InventoryMovement[]
+  stockLevels   StockLevel[]
+  costLayers    CostLayer[]
+
+  @@unique([tenantId, sku])
+  @@index([tenantId, categoryId, isActive])
+  @@index([tenantId, isActive])
+  @@map("products")
+}
+
+model Counterparty {
+  id             String              @id @default(uuid()) @db.Uuid
+  tenantId       String              @db.Uuid
+  code           String              @db.VarChar(32)
+  type           CounterpartyType
+  nameAr         String              @db.VarChar(256)
+  nameEn         String              @db.VarChar(256)
+  email          String?             @db.VarChar(256)
+  phone          String?             @db.VarChar(32)
+  addressJson    Json                @default("{}")
+  /// ZATCA VAT registration number of the counterparty (mandatory for B2B invoices).
+  taxNumber      String?             @db.VarChar(15)
+  crn            String?             @db.VarChar(20)
+  creditLimit    Decimal             @default(0) @db.Decimal(19, 4)
+  /// Cached AR (customer) / AP (supplier) balance in functional currency.
+  balance        Decimal             @default(0) @db.Decimal(19, 4)
+  /// Default payment terms in days (net N).
+  paymentTerms   Int                 @default(30)
+  classification CounterpartyClass   @default(C)
+  currency       String              @default("SAR") @db.Char(3)
+  isActive       Boolean             @default(true)
+  createdAt      DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime            @updatedAt @db.Timestamptz(6)
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  documents    Document[]
+  payments     Payment[]
+  journalLines JournalLine[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId, type, isActive])
+  @@map("counterparties")
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  BOUNDED CONTEXT: SALES & PROCUREMENT  (commercial documents)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Unified commercial document — sales/purchase invoices and credit/debit notes.
+/// Immutable once `isPosted = true` (trigger-enforced).
+model Document {
+  id              String         @id @default(uuid()) @db.Uuid
+  tenantId        String         @db.Uuid
+  /// e.g. `INV-2026-00001`. Unique per tenant; never reused, gaps allowed.
+  documentNumber  String         @db.VarChar(32)
+  type            DocumentType
+  status          DocumentStatus @default(DRAFT)
+  counterpartyId  String         @db.Uuid
+  branchId        String         @db.Uuid
+  warehouseId     String?        @db.Uuid
+  issueDate       DateTime       @db.Date
+  dueDate         DateTime       @db.Date
+  currency        String         @default("SAR") @db.Char(3)
+  exchangeRate    Decimal        @default(1) @db.Decimal(19, 6)
+  subtotal        Decimal        @default(0) @db.Decimal(19, 4)
+  discountTotal   Decimal        @default(0) @db.Decimal(19, 4)
+  taxTotal        Decimal        @default(0) @db.Decimal(19, 4)
+  total           Decimal        @default(0) @db.Decimal(19, 4)
+  /// Sum of allocated payments. `total - paidAmount` is the outstanding balance.
+  paidAmount      Decimal        @default(0) @db.Decimal(19, 4)
+  notes           String?        @db.VarChar(1024)
+  /// Links a credit note back to the invoice it corrects, or an invoice to its order.
+  referenceType   String?        @db.VarChar(32)
+  referenceId     String?        @db.VarChar(64)
+  isPosted        Boolean        @default(false)
+  postedAt        DateTime?      @db.Timestamptz(6)
+  voidedAt        DateTime?      @db.Timestamptz(6)
+  voidReason      String?        @db.VarChar(512)
+  createdById     String         @db.Uuid
+  postedById      String?        @db.Uuid
+  approvedById    String?        @db.Uuid
+  approvedAt      DateTime?      @db.Timestamptz(6)
+  createdAt       DateTime       @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime       @updatedAt @db.Timestamptz(6)
+
+  tenant       Tenant             @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  counterparty Counterparty       @relation(fields: [counterpartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  branch       Branch             @relation(fields: [branchId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  warehouse    Warehouse?         @relation(fields: [warehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  createdBy    User               @relation("DocumentCreatedBy", fields: [createdById], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  postedBy     User?              @relation("DocumentPostedBy", fields: [postedById], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  approvedBy   User?              @relation("DocumentApprovedBy", fields: [approvedById], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lines        DocumentLine[]
+  allocations  PaymentAllocation[]
+  zatca        ZatcaInvoice?
+
+  @@unique([tenantId, documentNumber])
+  @@index([tenantId, type, status, issueDate])
+  @@index([tenantId, counterpartyId, issueDate])
+  @@index([tenantId, issueDate])
+  @@index([tenantId, branchId, issueDate])
+  @@map("documents")
+}
+
+/// Line total formula (all steps exact decimal, no float):
+///   gross    = quantity * unitPrice
+///   net      = gross - discount
+///   taxAmount = round(net * taxRate / 100, 4)
+///   lineTotal = net + taxAmount
+model DocumentLine {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @db.Uuid
+  documentId  String   @db.Uuid
+  lineNumber  Int
+  productId   String   @db.Uuid
+  descriptionAr String? @db.VarChar(512)
+  quantity    Decimal  @db.Decimal(19, 4)
+  unitPrice   Decimal  @db.Decimal(19, 4)
+  discount    Decimal  @default(0) @db.Decimal(19, 4)
+  taxRate     Decimal  @default(15) @db.Decimal(5, 2)
+  taxAmount   Decimal  @default(0) @db.Decimal(19, 4)
+  lineTotal   Decimal  @default(0) @db.Decimal(19, 4)
+  /// Cost of goods sold for this line, resolved at posting time by the costing engine.
+  cogsAmount  Decimal  @default(0) @db.Decimal(19, 4)
+  batchNumber String?  @db.VarChar(64)
+  serialNumber String? @db.VarChar(64)
+  expiryDate  DateTime? @db.Date
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  product  Product  @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([documentId, lineNumber])
+  @@index([tenantId, productId])
+  @@map("document_lines")
+}
+
+/// ZATCA Phase 2 (Fatoora) e-invoicing envelope. One row per posted sales invoice.
+model ZatcaInvoice {
+  id             String   @id @default(uuid()) @db.Uuid
+  documentId     String   @unique @db.Uuid
+  /// Invoice UUID required by the ZATCA XML (`cbc:UUID`).
+  invoiceUuid    String   @unique @db.Uuid
+  /// SHA-256 of the previous invoice's canonicalised XML — the invoice hash chain.
+  previousHash   String   @db.VarChar(64)
+  invoiceHash    String   @db.VarChar(64)
+  /// TLV-encoded, Base64 QR payload (seller name, VAT no, timestamp, total, VAT).
+  qrCode         String
+  /// Signed UBL 2.1 XML document.
+  xml            String
+  /// `STANDARD` (B2B, clearance) or `SIMPLIFIED` (B2C, reporting).
+  invoiceTypeCode String  @db.VarChar(16)
+  /// UTC timestamp embedded in the QR/TLV payload.
+  issuedAtUtc    DateTime @db.Timestamptz(6)
+  submittedAt    DateTime? @db.Timestamptz(6)
+  clearanceStatus String?  @db.VarChar(32)
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([issuedAtUtc])
+  @@map("zatca_invoices")
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  BOUNDED CONTEXT: INVENTORY  (movements, stock levels, cost layers)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Append-only stock ledger. Range-partitioned by `movementDate` (yearly).
+model InventoryMovement {
+  id              String       @default(uuid()) @db.Uuid
+  tenantId        String       @db.Uuid
+  movementNumber  String       @db.VarChar(32)
+  type            MovementType
+  movementDate    DateTime     @db.Date
+  productId       String       @db.Uuid
+  warehouseId     String       @db.Uuid
+  branchId        String       @db.Uuid
+  /// Always positive. Direction is carried by `type`, never by sign.
+  quantity        Decimal      @db.Decimal(19, 4)
+  unitCost        Decimal      @db.Decimal(19, 4)
+  totalCost       Decimal      @db.Decimal(19, 4)
+  /// Running on-hand quantity after this movement — makes stock cards O(1) to read.
+  balanceAfter    Decimal      @db.Decimal(19, 4)
+  referenceType   String?      @db.VarChar(32)
+  referenceId     String?      @db.VarChar(64)
+  batchNumber     String?      @db.VarChar(64)
+  serialNumber    String?      @db.VarChar(64)
+  expiryDate      DateTime?    @db.Date
+  fromWarehouseId String?      @db.Uuid
+  toWarehouseId   String?      @db.Uuid
+  /// Pairs the OUT and IN legs of a single transfer.
+  transferGroupId String?      @db.Uuid
+  notes           String?      @db.VarChar(512)
+  createdById     String       @db.Uuid
+  createdAt       DateTime     @default(now()) @db.Timestamptz(6)
+
+  tenant        Tenant     @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product       Product    @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  warehouse     Warehouse  @relation("MovementWarehouse", fields: [warehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  branch        Branch     @relation(fields: [branchId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  fromWarehouse Warehouse? @relation("MovementFromWarehouse", fields: [fromWarehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  toWarehouse   Warehouse? @relation("MovementToWarehouse", fields: [toWarehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@id([id, movementDate])
+  @@unique([tenantId, movementNumber, movementDate])
+  @@index([tenantId, productId, warehouseId, movementDate])
+  @@index([tenantId, referenceType, referenceId])
+  @@index([tenantId, movementDate])
+  @@index([transferGroupId])
+  @@map("inventory_movements")
+}
+
+/// Denormalised on-hand position. Updated inside the same transaction as the
+/// movement it derives from, and guarded by `SELECT ... FOR UPDATE` to serialise
+/// concurrent issues against the same product/warehouse pair.
+model StockLevel {
+  id             String   @id @default(uuid()) @db.Uuid
+  tenantId       String   @db.Uuid
+  productId      String   @db.Uuid
+  warehouseId    String   @db.Uuid
+  quantityOnHand Decimal  @default(0) @db.Decimal(19, 4)
+  /// Committed to open sales orders but not yet issued. available = onHand - reserved.
+  quantityReserved Decimal @default(0) @db.Decimal(19, 4)
+  /// Weighted-average unit cost. Recomputed on every IN movement.
+  averageCost    Decimal  @default(0) @db.Decimal(19, 4)
+  /// Total inventory value = quantityOnHand * averageCost, materialised to avoid drift.
+  totalValue     Decimal  @default(0) @db.Decimal(19, 4)
+  lastMovementAt DateTime? @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(6)
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product   Product   @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([tenantId, productId, warehouseId])
+  @@index([tenantId, warehouseId])
+  @@map("stock_levels")
+}
+
+/// FIFO cost layers. Each IN movement opens a layer; each OUT consumes the oldest
+/// open layers first. Retained after exhaustion for COGS auditability.
+model CostLayer {
+  id                String    @id @default(uuid()) @db.Uuid
+  tenantId          String    @db.Uuid
+  productId         String    @db.Uuid
+  warehouseId       String    @db.Uuid
+  /// Movement that created this layer.
+  sourceMovementId  String    @db.Uuid
+  receivedAt        DateTime  @db.Timestamptz(6)
+  originalQuantity  Decimal   @db.Decimal(19, 4)
+  remainingQuantity Decimal   @db.Decimal(19, 4)
+  unitCost          Decimal   @db.Decimal(19, 4)
+  batchNumber       String?   @db.VarChar(64)
+  expiryDate        DateTime? @db.Date
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product   Product   @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([tenantId, productId, warehouseId, receivedAt])
+  @@index([tenantId, expiryDate])
+  @@map("cost_layers")
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  BOUNDED CONTEXT: TREASURY  (payments, allocations, bank reconciliation)
+// ═════════════════════════════════════════════════════════════════════════════
+
+model Payment {
+  id             String        @id @default(uuid()) @db.Uuid
+  tenantId       String        @db.Uuid
+  /// `RV-2026-00001` for receipts, `PV-2026-00001` for payments.
+  voucherNumber  String        @db.VarChar(32)
+  type           PaymentType
+  status         PaymentStatus @default(DRAFT)
+  counterpartyId String        @db.Uuid
+  branchId       String        @db.Uuid
+  paymentDate    DateTime      @db.Date
+  amount         Decimal       @db.Decimal(19, 4)
+  /// Portion of `amount` not yet allocated to a document (customer advance / prepayment).
+  unallocatedAmount Decimal    @default(0) @db.Decimal(19, 4)
+  currency       String        @default("SAR") @db.Char(3)
+  exchangeRate   Decimal       @default(1) @db.Decimal(19, 6)
+  method         PaymentMethod
+  /// Cash or bank GL account that is debited (receipt) or credited (payment).
+  accountId      String        @db.Uuid
+  checkNumber    String?       @db.VarChar(64)
+  checkDate      DateTime?     @db.Date
+  bankReference  String?       @db.VarChar(128)
+  notes          String?       @db.VarChar(512)
+  postedAt       DateTime?     @db.Timestamptz(6)
+  voidedAt       DateTime?     @db.Timestamptz(6)
+  createdById    String        @db.Uuid
+  postedById     String?       @db.Uuid
+  createdAt      DateTime      @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime      @updatedAt @db.Timestamptz(6)
+
+  tenant       Tenant              @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  counterparty Counterparty        @relation(fields: [counterpartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  branch       Branch              @relation(fields: [branchId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  account      Account             @relation(fields: [accountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  createdBy    User                @relation("PaymentCreatedBy", fields: [createdById], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  postedBy     User?               @relation("PaymentPostedBy", fields: [postedById], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  allocations  PaymentAllocation[]
+  bankMatches  BankStatementLine[]
+
+  @@unique([tenantId, voucherNumber])
+  @@index([tenantId, counterpartyId, paymentDate])
+  @@index([tenantId, status, paymentDate])
+  @@map("payments")
+}
+
+/// Settlement link between a payment and a document. The sum of allocations for a
+/// document may never exceed the document total (enforced in the domain service).
+model PaymentAllocation {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @db.Uuid
+  paymentId  String   @db.Uuid
+  documentId String   @db.Uuid
+  amount     Decimal  @db.Decimal(19, 4)
+  createdAt  DateTime @default(now()) @db.Timestamptz(6)
+
+  payment  Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  document Document @relation(fields: [documentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([paymentId, documentId])
+  @@index([tenantId, documentId])
+  @@map("payment_allocations")
+}
+
+model BankStatement {
+  id           String   @id @default(uuid()) @db.Uuid
+  tenantId     String   @db.Uuid
+  accountId    String   @db.Uuid
+  statementRef String   @db.VarChar(64)
+  periodStart  DateTime @db.Date
+  periodEnd    DateTime @db.Date
+  openingBalance Decimal @db.Decimal(19, 4)
+  closingBalance Decimal @db.Decimal(19, 4)
+  isReconciled Boolean  @default(false)
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+
+  tenant  Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  account Account             @relation(fields: [accountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lines   BankStatementLine[]
+
+  @@unique([tenantId, accountId, statementRef])
+  @@map("bank_statements")
+}
+
+model BankStatementLine {
+  id              String   @id @default(uuid()) @db.Uuid
+  bankStatementId String   @db.Uuid
+  valueDate       DateTime @db.Date
+  description     String   @db.VarChar(512)
+  reference       String?  @db.VarChar(128)
+  debit           Decimal  @default(0) @db.Decimal(19, 4)
+  credit          Decimal  @default(0) @db.Decimal(19, 4)
+  /// Payment this line was matched to during reconciliation.
+  matchedPaymentId String? @db.Uuid
+  matchedAt       DateTime? @db.Timestamptz(6)
+  /// Confidence of an automatic match (0..100); manual matches are 100.
+  matchScore      Int?
+
+  bankStatement  BankStatement @relation(fields: [bankStatementId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  matchedPayment Payment?      @relation(fields: [matchedPaymentId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@index([bankStatementId, valueDate])
+  @@index([matchedPaymentId])
+  @@map("bank_statement_lines")
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  BOUNDED CONTEXT: HUMAN RESOURCES
+// ═════════════════════════════════════════════════════════════════════════════
+
+model Department {
+  id       String  @id @default(uuid()) @db.Uuid
+  tenantId String  @db.Uuid
+  code     String  @db.VarChar(16)
+  nameAr   String  @db.VarChar(128)
+  nameEn   String  @db.VarChar(128)
+  parentId String? @db.Uuid
+  isActive Boolean @default(true)
+
+  tenant    Tenant       @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  parent    Department?  @relation("DepartmentTree", fields: [parentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  children  Department[] @relation("DepartmentTree")
+  employees Employee[]
+
+  @@unique([tenantId, code])
+  @@map("departments")
+}
+
+model Employee {
+  id             String    @id @default(uuid()) @db.Uuid
+  tenantId       String    @db.Uuid
+  employeeNumber String    @db.VarChar(32)
+  fullNameAr     String    @db.VarChar(256)
+  fullNameEn     String    @db.VarChar(256)
+  departmentId   String    @db.Uuid
+  branchId       String    @db.Uuid
+  jobTitleAr     String    @db.VarChar(128)
+  jobTitleEn     String    @db.VarChar(128)
+  /// AES-256-GCM ciphertext (national ID / iqama). Decrypted only for authorised roles.
+  nationalIdEnc  String?   @db.VarChar(512)
+  /// AES-256-GCM ciphertext (IBAN).
+  ibanEnc        String?   @db.VarChar(512)
+  email          String?   @db.VarChar(256)
+  phone          String?   @db.VarChar(32)
+  basicSalary    Decimal   @db.Decimal(19, 4)
+  /// [{ code, nameAr, nameEn, amount, isPercentage, taxable }]
+  allowancesJson Json      @default("[]")
+  /// [{ code, nameAr, nameEn, amount, isPercentage }]
+  deductionsJson Json      @default("[]")
+  hireDate       DateTime  @db.Date
+  terminationDate DateTime? @db.Date
+  isActive       Boolean   @default(true)
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  department   Department    @relation(fields: [departmentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  branch       Branch        @relation(fields: [branchId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  payrollLines PayrollLine[]
+
+  @@unique([tenantId, employeeNumber])
+  @@index([tenantId, departmentId, isActive])
+  @@map("employees")
+}
+
+model PayrollRun {
+  id          String        @id @default(uuid()) @db.Uuid
+  tenantId    String        @db.Uuid
+  runNumber   String        @db.VarChar(32)
+  year        Int
+  month       Int
+  status      JournalStatus @default(DRAFT)
+  totalGross  Decimal       @default(0) @db.Decimal(19, 4)
+  totalDeductions Decimal   @default(0) @db.Decimal(19, 4)
+  totalNet    Decimal       @default(0) @db.Decimal(19, 4)
+  postedAt    DateTime?     @db.Timestamptz(6)
+  journalId   String?       @db.Uuid
+  createdAt   DateTime      @default(now()) @db.Timestamptz(6)
+
+  tenant Tenant        @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lines  PayrollLine[]
+
+  @@unique([tenantId, year, month])
+  @@map("payroll_runs")
+}
+
+model PayrollLine {
+  id            String  @id @default(uuid()) @db.Uuid
+  payrollRunId  String  @db.Uuid
+  employeeId    String  @db.Uuid
+  basicSalary   Decimal @db.Decimal(19, 4)
+  allowances    Decimal @default(0) @db.Decimal(19, 4)
+  deductions    Decimal @default(0) @db.Decimal(19, 4)
+  /// gross = basicSalary + allowances; net = gross - deductions
+  gross         Decimal @db.Decimal(19, 4)
+  net           Decimal @db.Decimal(19, 4)
+  breakdownJson Json    @default("{}")
+
+  payrollRun PayrollRun @relation(fields: [payrollRunId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  employee   Employee   @relation(fields: [employeeId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([payrollRunId, employeeId])
+  @@map("payroll_lines")
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  BOUNDED CONTEXT: GOVERNANCE  (approval workflow, fixed assets)
+// ═════════════════════════════════════════════════════════════════════════════
+
+model ApprovalPolicy {
+  id            String   @id @default(uuid()) @db.Uuid
+  tenantId      String   @db.Uuid
+  /// Document type this policy governs, e.g. `SALES_INVOICE`, `PAYMENT`, `JOURNAL`.
+  documentType  String   @db.VarChar(32)
+  /// Policy only applies when the document total is at least this amount.
+  minAmount     Decimal  @default(0) @db.Decimal(19, 4)
+  isActive      Boolean  @default(true)
+
+  tenant   Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  steps    ApprovalStep[]
+  requests ApprovalRequest[]
+
+  @@unique([tenantId, documentType, minAmount])
+  @@map("approval_policies")
+}
+
+model ApprovalStep {
+  id         String  @id @default(uuid()) @db.Uuid
+  policyId   String  @db.Uuid
+  stepNumber Int
+  roleId     String  @db.Uuid
+  /// When true, the document's creator may not satisfy this step (SoD hard rule).
+  excludeInitiator Boolean @default(true)
+
+  policy ApprovalPolicy @relation(fields: [policyId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  role   Role           @relation(fields: [roleId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([policyId, stepNumber])
+  @@map("approval_steps")
+}
+
+model ApprovalRequest {
+  id           String         @id @default(uuid()) @db.Uuid
+  tenantId     String         @db.Uuid
+  policyId     String         @db.Uuid
+  entityType   String         @db.VarChar(32)
+  entityId     String         @db.VarChar(64)
+  currentStep  Int            @default(1)
+  status       ApprovalStatus @default(PENDING)
+  requestedById String        @db.Uuid
+  createdAt    DateTime       @default(now()) @db.Timestamptz(6)
+  completedAt  DateTime?      @db.Timestamptz(6)
+
+  tenant  Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  policy  ApprovalPolicy   @relation(fields: [policyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  actions ApprovalAction[]
+
+  @@unique([tenantId, entityType, entityId])
+  @@index([tenantId, status])
+  @@map("approval_requests")
+}
+
+model ApprovalAction {
+  id        String         @id @default(uuid()) @db.Uuid
+  requestId String         @db.Uuid
+  stepNumber Int
+  userId    String         @db.Uuid
+  decision  ApprovalStatus
+  comment   String?        @db.VarChar(512)
+  actedAt   DateTime       @default(now()) @db.Timestamptz(6)
+
+  request ApprovalRequest @relation(fields: [requestId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  user    User            @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([requestId, stepNumber])
+  @@map("approval_actions")
+}
+
+model FixedAsset {
+  id                 String              @id @default(uuid()) @db.Uuid
+  tenantId           String              @db.Uuid
+  assetNumber        String              @db.VarChar(32)
+  nameAr             String              @db.VarChar(256)
+  nameEn             String              @db.VarChar(256)
+  branchId           String              @db.Uuid
+  acquisitionDate    DateTime            @db.Date
+  acquisitionCost    Decimal             @db.Decimal(19, 4)
+  salvageValue       Decimal             @default(0) @db.Decimal(19, 4)
+  usefulLifeMonths   Int
+  method             DepreciationMethod  @default(STRAIGHT_LINE)
+  /// Declining-balance factor (2.0 = double declining). Ignored for straight line.
+  decliningFactor    Decimal             @default(2) @db.Decimal(5, 2)
+  accumulatedDepreciation Decimal        @default(0) @db.Decimal(19, 4)
+  /// acquisitionCost - accumulatedDepreciation
+  netBookValue       Decimal             @db.Decimal(19, 4)
+  assetAccountId     String              @db.Uuid
+  accumulatedAccountId String            @db.Uuid
+  expenseAccountId   String              @db.Uuid
+  disposedAt         DateTime?           @db.Date
+  isActive           Boolean             @default(true)
+
+  tenant             Tenant               @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  branch             Branch               @relation(fields: [branchId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  assetAccount       Account              @relation("AssetAccount", fields: [assetAccountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  accumulatedAccount Account              @relation("AccumulatedDepreciationAccount", fields: [accumulatedAccountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  expenseAccount     Account              @relation("DepreciationExpenseAccount", fields: [expenseAccountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  schedules          DepreciationSchedule[]
+
+  @@unique([tenantId, assetNumber])
+  @@index([tenantId, isActive])
+  @@map("fixed_assets")
+}
+
+model DepreciationSchedule {
+  id           String   @id @default(uuid()) @db.Uuid
+  assetId      String   @db.Uuid
+  periodDate   DateTime @db.Date
+  amount       Decimal  @db.Decimal(19, 4)
+  accumulated  Decimal  @db.Decimal(19, 4)
+  netBookValue Decimal  @db.Decimal(19, 4)
+  isPosted     Boolean  @default(false)
+  journalId    String?  @db.Uuid
+
+  asset FixedAsset @relation(fields: [assetId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([assetId, periodDate])
+  @@map("depreciation_schedules")
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  ENUMS
+// ═════════════════════════════════════════════════════════════════════════════
+
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+}
+
+enum AccountNature {
+  DEBIT
+  CREDIT
+}
+
+enum FiscalStatus {
+  OPEN
+  CLOSED
+  /// Reopened for adjustments; only users with `finance.period.reopen` may post.
+  LOCKED
+}
+
+enum JournalType {
+  GENERAL
+  SALES
+  PURCHASE
+  CASH
+  INVENTORY
+  PAYROLL
+  ADJUSTMENT
+  DEPRECIATION
+  OPENING
+  CLOSING
+}
+
+enum JournalStatus {
+  DRAFT
+  POSTED
+  REVERSED
+}
+
+enum DocumentType {
+  SALES_INVOICE
+  PURCHASE_INVOICE
+  SALES_CREDIT_NOTE
+  PURCHASE_DEBIT_NOTE
+}
+
+enum DocumentStatus {
+  DRAFT
+  PENDING_APPROVAL
+  POSTED
+  PARTIAL_PAID
+  FULLY_PAID
+  VOID
+  RETURNED
+}
+
+enum CounterpartyType {
+  CUSTOMER
+  SUPPLIER
+  /// An entity that is both a customer and a supplier (net-off candidate).
+  BOTH
+}
+
+enum CounterpartyClass {
+  A
+  B
+  C
+}
+
+enum MovementType {
+  IN
+  OUT
+  TRANSFER
+  ADJUSTMENT
+  RETURN
+}
+
+enum CostingMethod {
+  FIFO
+  WEIGHTED_AVERAGE
+}
+
+enum PaymentType {
+  RECEIPT
+  PAYMENT
+}
+
+enum PaymentMethod {
+  CASH
+  BANK
+  CHECK
+  CARD
+}
+
+enum PaymentStatus {
+  DRAFT
+  POSTED
+  VOID
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  POST
+  VOID
+  APPROVE
+  REJECT
+  REVERSE
+  LOGIN
+  LOGOUT
+  LOGIN_FAILED
+  EXPORT
+  ACCESS_DENIED
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+enum DepreciationMethod {
+  STRAIGHT_LINE
+  DECLINING_BALANCE
+}
