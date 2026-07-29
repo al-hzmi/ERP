@@ -49,7 +49,20 @@ export interface HandlerOptions {
   readonly permission?: { resource: string; action: string };
 }
 
-type Handler<T> = (context: RequestContext, request: Request) => Promise<Result<T, DomainError>>;
+/**
+ * Dynamic segments of the matched route, exactly as Next.js supplies them.
+ *
+ * Untyped on purpose: a URL segment is a string until something validates it.
+ * Routes parse this with a schema rather than trusting the shape — an id that
+ * arrives in the path deserves no more faith than one that arrives in the body.
+ */
+export type RouteParams = Readonly<Record<string, string | string[] | undefined>>;
+
+type Handler<T> = (
+  context: RequestContext,
+  request: Request,
+  params: RouteParams,
+) => Promise<Result<T, DomainError>>;
 
 /**
  * Wraps a handler with the cross-cutting concerns.
@@ -57,9 +70,17 @@ type Handler<T> = (context: RequestContext, request: Request) => Promise<Result<
  * Note the ordering: rate limiting comes before authentication, because an
  * unauthenticated flood must be cheap to reject. Authentication comes before the
  * permission check, which comes before any database work.
+ *
+ * The second argument is what Next.js passes for a dynamic route. Accepting it
+ * here is what lets `/invoices/[id]/post` use this wrapper instead of
+ * reimplementing authentication, rate limiting and error shaping by hand — which
+ * is exactly how a route ends up quietly missing one of them.
  */
 export function apiHandler<T>(handler: Handler<T>, options: HandlerOptions = {}) {
-  return async (request: Request): Promise<NextResponse<ApiResponse<T>>> => {
+  return async (
+    request: Request,
+    routeContext?: { params?: RouteParams },
+  ): Promise<NextResponse<ApiResponse<T>>> => {
     const started = Date.now();
 
     try {
@@ -110,7 +131,7 @@ export function apiHandler<T>(handler: Handler<T>, options: HandlerOptions = {})
           userId: context.userId,
           correlationId: context.correlationId,
         },
-        () => handler(context, request),
+        () => handler(context, request, routeContext?.params ?? {}),
       );
 
       if (!result.ok) {

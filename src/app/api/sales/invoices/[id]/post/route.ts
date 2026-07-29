@@ -1,10 +1,8 @@
-import { NextResponse } from 'next/server';
+import { z } from 'zod';
+import { apiHandler } from '@/lib/api/handler';
 import { DomainErrors } from '@/lib/domain/shared/errors';
+import { err } from '@/lib/domain/shared/result';
 import { postSalesInvoice } from '@/lib/application/use-cases/post-sales-invoice';
-import { getRequestContext } from '@/lib/infrastructure/auth/request-context';
-import { serialiseForJson } from '@/lib/infrastructure/db/decimal-mapper';
-import { logger } from '@/lib/infrastructure/logging/logger';
-import { checkRateLimit, rateLimitHeaders } from '@/lib/infrastructure/security/rate-limit';
 
 /**
  * Posts a sales invoice.
@@ -13,51 +11,46 @@ import { checkRateLimit, rateLimitHeaders } from '@/lib/infrastructure/security/
  * an edit: it is a distinct, irreversible business act with its own permission,
  * its own segregation-of-duties rule and its own audit entry.
  *
- * Written against the raw signature rather than `apiHandler` because Next.js
- * passes the dynamic route params as a second argument.
+ * This used to be written against the raw Next.js signature, because
+ * `apiHandler` had no way to receive the dynamic `[id]`. The cost of that
+ * workaround was a route that re-implemented authentication, rate limiting and
+ * error shaping by hand — and, in doing so, skipped the route-level permission
+ * gate every other endpoint gets. Nothing was exposed, because the use case
+ * checks the same permission itself; but the next route copied from this one
+ * would have inherited the omission without inheriting the second line of
+ * defence. `apiHandler` now takes route params, so the exception is gone.
  */
-export async function POST(
-  request: Request,
-  { params }: { params: { id: string } },
-): Promise<NextResponse> {
-  const contextResult = await getRequestContext();
 
-  if (!contextResult.ok) {
-    return NextResponse.json(
-      { success: false, error: contextResult.error.toJSON() },
-      { status: contextResult.error.httpStatus },
-    );
-  }
+/**
+ * The id is validated before it reaches the use case.
+ *
+ * A path segment is user input. Passing an arbitrary string to a lookup means
+ * the difference between "not found" and "malformed request" is decided by
+ * whatever the database does with it — and on a `uuid` column, that is an error
+ * rather than an empty result.
+ */
+const paramsSchema = z.object({
+  id: z.string().uuid(),
+});
 
-  const context = contextResult.value;
+export const POST = apiHandler(
+  async (context, _request, params) => {
+    const parsed = paramsSchema.safeParse(params);
 
-  const limit = checkRateLimit('mutation', context.userId);
-  if (!limit.allowed) {
-    const error = DomainErrors.rateLimited(limit.retryAfterSeconds);
-    return NextResponse.json(
-      { success: false, error: error.toJSON() },
-      { status: 429, headers: rateLimitHeaders(limit) },
-    );
-  }
-
-  try {
-    const result = await postSalesInvoice(context, { documentId: params.id });
-
-    if (!result.ok) {
-      return NextResponse.json(
-        { success: false, error: result.error.toJSON() },
-        { status: result.error.httpStatus },
+    if (!parsed.success) {
+      return err(
+        DomainErrors.validation(
+          'معرّف الفاتورة غير صالح.',
+          'The invoice identifier is not a valid UUID.',
+          'id',
+        ),
       );
     }
 
-    return NextResponse.json({ success: true, data: serialiseForJson(result.value) });
-  } catch (error) {
-    const reference = crypto.randomUUID();
-    logger.error('Failed to post sales invoice', { reference, documentId: params.id, error });
-    const domainError = DomainErrors.internal(reference);
-    return NextResponse.json(
-      { success: false, error: domainError.toJSON() },
-      { status: 500 },
-    );
-  }
-}
+    return postSalesInvoice(context, { documentId: parsed.data.id });
+  },
+  {
+    rateLimit: 'mutation',
+    permission: { resource: 'sales.invoice', action: 'post' },
+  },
+);

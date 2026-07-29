@@ -2,18 +2,28 @@ import { PrismaClient, Prisma } from '@prisma/client';
 import { currentTenantId } from './tenant-scope';
 
 /**
- * The Prisma client singleton.
+ * The Prisma clients.
  *
- * Next.js hot-reloads modules in development, which would otherwise open a new
- * pool on every edit until PostgreSQL refuses connections. Stashing the instance
- * on `globalThis` keeps exactly one pool alive across reloads.
+ * There are two, and the distinction matters.
+ *
+ * `base` is an ordinary client. Everything that opens its own transaction —
+ * `withTransaction`, `withTenantRead`, and the tenant binding itself — goes
+ * through it, so the transaction client handed to a use case has exactly the
+ * type it always had.
+ *
+ * `prisma` is `base` with one extension: any query issued outside a transaction
+ * is wrapped in a tiny transaction that binds `erp.tenant_id` first. Without it,
+ * a direct `prisma.document.findMany(...)` — which is what every page and every
+ * report service does — would carry no tenant, and the row-level security
+ * policies from migration 004 would reject every row.
+ *
+ * The alternative was to convert some seventy call sites to pass a transaction
+ * client around. That would have been seventy chances to miss one, and the one
+ * missed would be the one that returns an empty screen in production on a
+ * Tuesday. Binding at the client is a single place that cannot be forgotten.
  */
 
-const globalForPrisma = globalThis as unknown as {
-  prisma: PrismaClient | undefined;
-};
-
-function createClient(): PrismaClient {
+function createBaseClient(): PrismaClient {
   const client = new PrismaClient({
     log:
       process.env.NODE_ENV === 'development'
@@ -40,9 +50,65 @@ function createClient(): PrismaClient {
   return client;
 }
 
-export const prisma: PrismaClient = globalForPrisma.prisma ?? createClient();
+/**
+ * Wraps every standalone operation in a tenant-bound transaction.
+ *
+ * `$allOperations` at the top level covers model calls and raw queries alike,
+ * which matters because the reporting services are written almost entirely in
+ * `$queryRaw` — an extension that only reached the model delegates would leave
+ * the reports unprotected while looking complete.
+ *
+ * The two statements go in a batch transaction so they share one connection:
+ * `set_config(..., TRUE)` is transaction-local, and setting it on a connection
+ * the query might not be issued on would bind nothing at all.
+ *
+ * When there is no ambient tenant — migrations, the seed generator, a
+ * maintenance script — the query is passed straight through and the connection's
+ * own privileges decide what it may see. That is the owner's business, not this
+ * layer's.
+ */
+function createExtendedClient(base: PrismaClient) {
+  return base.$extends({
+    query: {
+      async $allOperations({ args, query }) {
+        const tenantId = currentTenantId();
+
+        if (tenantId === undefined) {
+          return query(args);
+        }
+
+        const [, result] = await base.$transaction([
+          base.$executeRaw`SELECT set_config('erp.tenant_id', ${tenantId}::text, TRUE)`,
+          // The extension's own typing describes this as a plain promise; the
+          // batch form needs the Prisma flavour of one. Same object, narrower
+          // declaration.
+          query(args) as Prisma.PrismaPromise<unknown>,
+        ]);
+
+        return result;
+      },
+    },
+  });
+}
+
+type ExtendedPrismaClient = ReturnType<typeof createExtendedClient>;
+
+/**
+ * Next.js hot-reloads modules in development, which would otherwise open a new
+ * pool on every edit until PostgreSQL refuses connections. Stashing the
+ * instances on `globalThis` keeps exactly one pool alive across reloads.
+ */
+const globalForPrisma = globalThis as unknown as {
+  prismaBase: PrismaClient | undefined;
+  prisma: ExtendedPrismaClient | undefined;
+};
+
+const base: PrismaClient = globalForPrisma.prismaBase ?? createBaseClient();
+
+export const prisma: ExtendedPrismaClient = globalForPrisma.prisma ?? createExtendedClient(base);
 
 if (process.env.NODE_ENV !== 'production') {
+  globalForPrisma.prismaBase = base;
   globalForPrisma.prisma = prisma;
 }
 
@@ -103,7 +169,7 @@ export async function withTransaction<T>(
 
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
     try {
-      return await prisma.$transaction(
+      return await base.$transaction(
         async (tx) => {
           if (tenantId !== undefined) {
             await setTenantContext(tx, tenantId);
@@ -135,17 +201,17 @@ export async function withTransaction<T>(
 }
 
 /**
- * Runs a read under the tenant's row-level security, without paying for
+ * Runs several reads under one tenant-bound transaction, without paying for
  * serialisable isolation.
  *
  * A report or a list page reads and does not write, so the anomalies
  * `Serializable` exists to prevent cannot occur — and taking predicate locks for
- * a dashboard would make every write on the system queue behind a chart. Read
- * Committed is correct here, but the transaction is still required: `set_config`
- * with `is_local = true` scopes the tenant binding to a transaction, and outside
- * one there is nothing to scope it to.
+ * a dashboard would make every write on the system queue behind a chart.
  *
- * Every read path that previously called `prisma` directly belongs in here.
+ * The client extension already binds a tenant to standalone queries, so this is
+ * not needed for correctness. It is needed for cost: a page that issues eleven
+ * queries pays for eleven transactions through the extension and one through
+ * here. Group reads that belong to the same screen.
  */
 export async function withTenantRead<T>(
   work: (tx: TransactionClient) => Promise<T>,
@@ -155,7 +221,7 @@ export async function withTenantRead<T>(
 
   warnIfUnscoped('withTenantRead', tenantId);
 
-  return prisma.$transaction(
+  return base.$transaction(
     async (tx) => {
       if (tenantId !== undefined) {
         await setTenantContext(tx, tenantId);
@@ -185,7 +251,7 @@ export async function setTenantContext(tx: TransactionClient, tenantId: string):
 }
 
 /**
- * Complains, in development, about a database call with no tenant bound.
+ * Complains, in development, about a transaction with no tenant bound.
  *
  * Silent in production and in the seed: both have unscoped work that is
  * legitimate. In development it catches the wiring mistake at the moment it is
