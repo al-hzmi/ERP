@@ -36,7 +36,20 @@ export interface SearchHit {
   readonly subtitle: string | null;
   /** 0..1, comparable across entity types. */
   readonly score: number;
-  readonly href: string;
+  /**
+   * Where selecting this hit goes — or `null` when nothing has been built to go to.
+   *
+   * Nullable rather than always a string, because it was always a string and six of the seven
+   * values it produced were routes that did not exist: a search hit was a 404 waiting for
+   * someone to press Enter on it. A hit with no destination is still worth returning — it
+   * confirms the record exists and shows its code, name and balance — so it is rendered as a
+   * plain row instead of a link.
+   *
+   * Where a *register* exists it is preferred over a detail page that does not: an invoice hit
+   * lands on the sales register filtered to that number, which answers the question the search
+   * was asking without inventing a screen.
+   */
+  readonly href: string | null;
 }
 
 export interface SearchOptions {
@@ -166,7 +179,9 @@ async function searchProducts(
     titleEn: row.nameEn,
     subtitle: `${row.salePrice} SAR`,
     score: row.score,
-    href: `/inventory/products/${row.id}`,
+    // No product detail page yet. The stock card is the closest built screen and takes a
+    // product, so a hit lands there rather than nowhere.
+    href: `/inventory/stock-card?productId=${row.id}`,
   }));
 }
 
@@ -228,10 +243,9 @@ async function searchCounterparties(
     titleEn: row.nameEn,
     subtitle: row.phone,
     score: row.score,
-    href:
-      row.type === 'SUPPLIER'
-        ? `/procurement/suppliers/${row.id}`
-        : `/sales/customers/${row.id}`,
+    // Neither the customer nor the supplier screen exists. Returned without a destination
+    // rather than pointed at a 404.
+    href: null,
   }));
 }
 
@@ -268,7 +282,9 @@ async function searchAccounts(
     titleEn: row.nameEn,
     subtitle: row.balance,
     score: row.score,
-    href: `/finance/accounts/${row.id}`,
+    // The chart of accounts is a planned screen; the trial balance is a report, not an
+    // account view. No destination until one is built.
+    href: null,
   }));
 }
 
@@ -318,9 +334,11 @@ async function searchDocuments(
     titleEn: row.counterpartyName,
     subtitle: `${row.total} — ${row.status}`,
     score: row.score,
+    // The sales register supports `?q=`, so a hit filters it to this document. There is no
+    // purchase register at all, so those hits carry no destination.
     href: row.type.startsWith('SALES')
-      ? `/sales/invoices/${row.id}`
-      : `/procurement/invoices/${row.id}`,
+      ? `/sales/invoices?q=${encodeURIComponent(row.documentNumber)}`
+      : null,
   }));
 }
 
@@ -370,6 +388,7 @@ async function searchEmployees(
     titleEn: row.fullNameEn,
     subtitle: row.jobTitleAr,
     score: row.score,
-    href: `/hr/employees/${row.id}`,
+    // No employee screen yet.
+    href: null,
   }));
 }

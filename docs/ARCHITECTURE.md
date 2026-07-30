@@ -52,7 +52,7 @@ each other's tables.
 ```
 
 `domain/` imports nothing from the outer layers. That is not architectural
-purity for its own sake: it is why 331 tests covering the whole of the system's
+purity for its own sake: it is why 344 tests covering the whole of the system's
 accounting behaviour run in under a second with no database.
 
 ### Bounded contexts
@@ -538,7 +538,35 @@ Ordered by what a real deployment would need next:
    written next to it. That converts "someone must remember" into "the deploy fails" — which is
    the only reason this gap existed for nine migrations. `child-table-isolation.test.ts`
    repeats it so it is checked on every run, not only when a migration is applied.
-10. Partition maintenance job calling `erp_ensure_year_partition` ahead of time.
+10. ~~Build the journal and voucher registers, and stop the navigation linking to screens
+    that do not exist.~~ Done, and the second half is the part worth keeping.
+
+    Eight sidebar entries pointed at routes that had never been written. Two of them —
+    `/finance/journals` and `/treasury/payments` — had complete, tested APIs behind them and
+    no page, so the first thing a user clicked returned 404 on a feature that was finished
+    except for its screen. Global search was worse: six of its seven destinations were
+    detail routes that did not exist, so pressing Enter on almost any hit was a 404 from a
+    keystroke everyone has in their fingers.
+
+    The registers are now built, along with voucher entry over `recordPayment` — which had
+    been fully tested since the first commit with nothing calling it from outside. The
+    voucher form is built around one figure, `unallocated`, computed in the same scale-4
+    `Money` the API posts with, so what is read before submitting is what the server
+    computes.
+
+    The structural fix is that the navigation tree moved into `lib/navigation.ts`, away from
+    the component that renders it, so a test can import it — and `tests/unit/navigation.test.ts`
+    now asserts that every `href` in the tree resolves to a real `page.tsx` on disk. It is a
+    filesystem check, deliberately crude: no route matcher, no build, no server, so it runs in
+    a millisecond and cannot go stale against a framework upgrade.
+
+    An unbuilt screen is listed with a *قريباً* badge and **no `href` at all**, which is the
+    rule that keeps the test meaningful. A disabled link would have passed a naive version of
+    the check and still 404'd: "disabled" on an anchor is styling, and `pointer-events-none`
+    stops a mouse click while leaving middle-click, keyboard focus and the screen-reader link
+    list all pointing at a dead URL. The renderer has no branch that produces an anchor
+    without a page behind it.
+11. Partition maintenance job calling `erp_ensure_year_partition` ahead of time.
    Deliberately last: migration 2 pre-creates yearly partitions through 2032 and
    every parent has a DEFAULT partition, so an out-of-range insert is slower rather
    than rejected. This is an optimisation with a 2032 deadline, not a latent outage.

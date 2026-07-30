@@ -2,32 +2,18 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import {
-  ArrowLeftRight,
-  Banknote,
-  Building2,
-  BookPlus,
-  Landmark,
-  Boxes,
-  ClipboardCheck,
-  FilePlus2,
-  ChevronsLeftRight,
-  FileText,
-  LayoutDashboard,
-  Moon,
-  Receipt,
-  Scale,
-  ScrollText,
-  Search,
-  Sun,
-  Users,
-  Warehouse,
-} from 'lucide-react';
+import { ChevronDown, ChevronsLeftRight, Moon, Scale, Search, Sun } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { OfflineBar } from './offline-bar';
 import { cn } from '@/lib/utils/cn';
 import { useUiStore } from '@/store/ui-store';
 import { GlobalSearch } from './global-search';
+import {
+  activeModuleFor,
+  GROUP_LABELS,
+  NAVIGATION,
+  type NavItem,
+} from '@/lib/navigation';
 
 /**
  * The application frame: a right-hand sidebar, a header, and the page.
@@ -36,75 +22,6 @@ import { GlobalSearch } from './global-search';
  * positioned with logical properties (`start`/`end`) rather than left/right, so
  * switching the interface to English moves it without a single CSS override.
  */
-
-interface NavItem {
-  readonly href: string;
-  readonly labelAr: string;
-  readonly labelEn: string;
-  readonly icon: typeof LayoutDashboard;
-}
-
-interface NavSection {
-  readonly titleAr: string;
-  readonly titleEn: string;
-  readonly items: readonly NavItem[];
-}
-
-const NAVIGATION: readonly NavSection[] = [
-  {
-    titleAr: 'الرئيسية',
-    titleEn: 'Overview',
-    items: [
-      { href: '/', labelAr: 'لوحة المعلومات', labelEn: 'Dashboard', icon: LayoutDashboard },
-    ],
-  },
-  {
-    titleAr: 'المبيعات',
-    titleEn: 'Sales',
-    items: [
-      { href: '/sales/invoices', labelAr: 'فواتير المبيعات', labelEn: 'Sales Invoices', icon: Receipt },
-      { href: '/sales/invoices/new', labelAr: 'فاتورة جديدة', labelEn: 'New Invoice', icon: FilePlus2 },
-      { href: '/sales/customers', labelAr: 'العملاء', labelEn: 'Customers', icon: Users },
-    ],
-  },
-  {
-    titleAr: 'المشتريات',
-    titleEn: 'Procurement',
-    items: [
-      { href: '/procurement/invoices', labelAr: 'فواتير المشتريات', labelEn: 'Purchase Invoices', icon: FileText },
-      { href: '/procurement/suppliers', labelAr: 'الموردون', labelEn: 'Suppliers', icon: Users },
-    ],
-  },
-  {
-    titleAr: 'المخزون',
-    titleEn: 'Inventory',
-    items: [
-      { href: '/inventory/products', labelAr: 'الأصناف', labelEn: 'Products', icon: Boxes },
-      { href: '/inventory/stock-card', labelAr: 'بطاقة الصنف', labelEn: 'Stock Card', icon: ScrollText },
-      { href: '/inventory/stock', labelAr: 'أرصدة المخزون', labelEn: 'Stock Balances', icon: Warehouse },
-      { href: '/inventory/transfers', labelAr: 'التحويلات', labelEn: 'Transfers', icon: ArrowLeftRight },
-    ],
-  },
-  {
-    titleAr: 'المالية',
-    titleEn: 'Financials',
-    items: [
-      { href: '/finance/journals', labelAr: 'القيود المحاسبية', labelEn: 'Journal Entries', icon: FileText },
-      { href: '/finance/journals/new', labelAr: 'قيد جديد', labelEn: 'New Journal Entry', icon: BookPlus },
-      { href: '/finance/trial-balance', labelAr: 'ميزان المراجعة', labelEn: 'Trial Balance', icon: Scale },
-      { href: '/treasury/payments', labelAr: 'سندات القبض والصرف', labelEn: 'Payment Vouchers', icon: Banknote },
-      { href: '/treasury/reconciliation', labelAr: 'التسوية البنكية', labelEn: 'Bank Reconciliation', icon: Landmark },
-      { href: '/finance/depreciation', labelAr: 'إهلاك الأصول الثابتة', labelEn: 'Fixed Asset Depreciation', icon: Building2 },
-    ],
-  },
-  {
-    titleAr: 'الحاكمية',
-    titleEn: 'Governance',
-    items: [
-      { href: '/approvals', labelAr: 'صندوق الاعتمادات', labelEn: 'Approvals', icon: ClipboardCheck },
-    ],
-  },
-];
 
 export function AppShell({
   children,
@@ -116,6 +33,35 @@ export function AppShell({
   const pathname = usePathname();
   const { locale, theme, sidebarCollapsed, toggleTheme, toggleSidebar } = useUiStore();
   const [searchOpen, setSearchOpen] = useState(false);
+
+  const activeModule = activeModuleFor(pathname);
+
+  // Seeded with the module the current page belongs to, so arriving on a screen shows where
+  // you are rather than a wall of closed sections. Multiple sections may stay open at once:
+  // an accountant moving between the journal register and the trial balance should not have
+  // the first collapse under them.
+  const [openModules, setOpenModules] = useState<ReadonlySet<string>>(
+    () => new Set(activeModule !== null ? [activeModule] : [NAVIGATION[0]?.titleEn ?? '']),
+  );
+
+  // Following a link into another module opens it. Without this, navigating from the sidebar
+  // to a screen in a closed section leaves the tree pointing somewhere else entirely.
+  useEffect(() => {
+    if (activeModule === null) return;
+    setOpenModules((previous) => {
+      if (previous.has(activeModule)) return previous;
+      return new Set([...previous, activeModule]);
+    });
+  }, [activeModule]);
+
+  function toggleModule(title: string): void {
+    setOpenModules((previous) => {
+      const next = new Set(previous);
+      if (next.has(title)) next.delete(title);
+      else next.add(title);
+      return next;
+    });
+  }
 
   // Ctrl/Cmd+K opens search from anywhere — the shortcut every user of a system
   // like this already has in their fingers.
@@ -157,43 +103,90 @@ export function AppShell({
           ) : null}
         </div>
 
-        <nav className="flex-1 space-y-5 overflow-y-auto px-3 py-4" aria-label="التنقل الرئيسي">
-          {NAVIGATION.map((section) => (
-            <div key={section.titleEn}>
-              {!sidebarCollapsed ? (
-                <p className="px-2 pb-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  {locale === 'ar' ? section.titleAr : section.titleEn}
-                </p>
-              ) : null}
-              <ul className="space-y-1">
-                {section.items.map((item) => {
-                  const active =
-                    item.href === '/' ? pathname === '/' : pathname.startsWith(item.href);
-                  const Icon = item.icon;
-                  const label = locale === 'ar' ? item.labelAr : item.labelEn;
+        <nav
+          className="flex-1 space-y-1 overflow-y-auto px-3 py-4"
+          aria-label="التنقل الرئيسي"
+        >
+          {NAVIGATION.map((module) => {
+            const expanded = openModules.has(module.titleEn);
+            const ModuleIcon = module.icon;
+            const title = locale === 'ar' ? module.titleAr : module.titleEn;
+            const panelId = `nav-panel-${module.titleEn.replace(/\W+/g, '-').toLowerCase()}`;
 
-                  return (
-                    <li key={item.href}>
-                      <Link
-                        href={item.href}
-                        title={sidebarCollapsed ? label : undefined}
-                        aria-current={active ? 'page' : undefined}
-                        className={cn(
-                          'flex items-center gap-3 rounded-md px-2.5 py-2 text-sm transition-colors',
-                          active
-                            ? 'bg-primary/10 font-medium text-primary'
-                            : 'text-foreground/80 hover:bg-accent hover:text-accent-foreground',
-                        )}
-                      >
-                        <Icon className="h-[18px] w-[18px] shrink-0" aria-hidden="true" />
-                        {!sidebarCollapsed ? <span className="truncate">{label}</span> : null}
-                      </Link>
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          ))}
+            // Collapsed rail: the accordion has nowhere to expand into, so the module icon
+            // becomes the affordance and clicking it opens the sidebar rather than a panel
+            // nobody can read.
+            if (sidebarCollapsed) {
+              return (
+                <button
+                  key={module.titleEn}
+                  type="button"
+                  onClick={toggleSidebar}
+                  title={title}
+                  className={cn(
+                    'flex w-full items-center justify-center rounded-md py-2.5 transition-colors',
+                    activeModule === module.titleEn
+                      ? 'bg-primary/10 text-primary'
+                      : 'text-foreground/70 hover:bg-accent hover:text-accent-foreground',
+                  )}
+                >
+                  <ModuleIcon className="h-[18px] w-[18px]" aria-hidden="true" />
+                  <span className="sr-only">{title}</span>
+                </button>
+              );
+            }
+
+            return (
+              <div key={module.titleEn}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    toggleModule(module.titleEn);
+                  }}
+                  aria-expanded={expanded}
+                  aria-controls={panelId}
+                  className={cn(
+                    'flex w-full items-center gap-3 rounded-md px-2.5 py-2 text-sm transition-colors',
+                    activeModule === module.titleEn
+                      ? 'font-medium text-primary'
+                      : 'text-foreground/80 hover:bg-accent hover:text-accent-foreground',
+                  )}
+                >
+                  <ModuleIcon className="h-[18px] w-[18px] shrink-0" aria-hidden="true" />
+                  <span className="truncate">{title}</span>
+                  <ChevronDown
+                    className={cn(
+                      'ms-auto h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-200',
+                      expanded && 'rotate-180',
+                    )}
+                    aria-hidden="true"
+                  />
+                </button>
+
+                {expanded ? (
+                  <div id={panelId} className="mt-1 space-y-3 pb-2 ps-3">
+                    {module.groups.map((group) => (
+                      <div key={group.kind}>
+                        <p className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+                          {locale === 'ar' ? GROUP_LABELS[group.kind].ar : GROUP_LABELS[group.kind].en}
+                        </p>
+                        <ul className="space-y-0.5 border-s border-border ps-2">
+                          {group.items.map((item) => (
+                            <NavRow
+                              key={`${item.labelEn}-${item.href ?? 'planned'}`}
+                              item={item}
+                              locale={locale}
+                              pathname={pathname}
+                            />
+                          ))}
+                        </ul>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
         </nav>
 
         <button
@@ -265,5 +258,67 @@ export function AppShell({
         }}
       />
     </div>
+  );
+}
+
+/**
+ * One row in a module's list — a link, or a planned screen that is deliberately not one.
+ *
+ * The two branches are the point. An item with an `href` renders an anchor; an item without
+ * renders a `<span>` and nothing else. There is no third case where a planned screen gets a
+ * disabled anchor, because "disabled" on an anchor is decoration: `pointer-events-none` stops
+ * a mouse click and nothing else, leaving middle-click, keyboard focus and a screen reader's
+ * link list all pointing at a URL that answers 404. `aria-disabled` on an `<a href>` is worse
+ * still — it announces the control as unavailable while leaving it fully operable.
+ */
+function NavRow({
+  item,
+  locale,
+  pathname,
+}: {
+  item: NavItem;
+  locale: 'ar' | 'en';
+  pathname: string;
+}): JSX.Element {
+  const Icon = item.icon;
+  const label = locale === 'ar' ? item.labelAr : item.labelEn;
+
+  if (item.href === undefined) {
+    return (
+      <li>
+        <span
+          className="flex cursor-default items-center gap-2.5 rounded-md px-2.5 py-1.5 text-[13px] text-muted-foreground/55"
+          title={locale === 'ar' ? 'لم تُنفَّذ بعد' : 'Not implemented yet'}
+        >
+          <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
+          <span className="truncate">{label}</span>
+          <span className="ms-auto shrink-0 rounded-full bg-muted px-1.5 py-px text-[9px] font-medium text-muted-foreground">
+            {locale === 'ar' ? 'قريباً' : 'Soon'}
+          </span>
+        </span>
+      </li>
+    );
+  }
+
+  // Exact match, not `startsWith`. A prefix test marks "القيود المحاسبية" as current while the
+  // user is on "قيد جديد", so two rows claim to be the page at once.
+  const active = pathname === item.href;
+
+  return (
+    <li>
+      <Link
+        href={item.href}
+        aria-current={active ? 'page' : undefined}
+        className={cn(
+          'flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-[13px] transition-colors',
+          active
+            ? 'bg-primary/10 font-medium text-primary'
+            : 'text-foreground/75 hover:bg-accent hover:text-accent-foreground',
+        )}
+      >
+        <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
+        <span className="truncate">{label}</span>
+      </Link>
+    </li>
   );
 }

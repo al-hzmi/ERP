@@ -38,7 +38,7 @@ meaningfully: `sales` can raise an invoice but not post it, `auditor` can read
 everything and change nothing.
 
 ```bash
-npm test           # 509 tests (331 unit + 178 integration)
+npm test           # 522 tests (344 unit + 178 integration)
 npm run typecheck  # strict TypeScript, no `any`, no `@ts-ignore`
 npm run build      # production build
 ```
@@ -112,7 +112,7 @@ prisma/
 ├── migrations/               9 migrations (see below)
 └── seed.ts + seed/           the data generator
 tests/
-├── unit/                     331 tests, no database required
+├── unit/                     344 tests, no database required
 └── integration/              178 tests against real PostgreSQL
 ```
 
@@ -206,7 +206,18 @@ only the application change that put every read path inside a tenant scope. See
 | **Stock card** | `/inventory/stock-card` | One product in one warehouse, movement by movement, running balance |
 | **Bank reconciliation** | `/treasury/reconciliation` | Statement lines against payment vouchers, with the difference answered at a glance |
 | **Fixed asset depreciation** | `/finance/depreciation` | The charges due this period, what the run will skip and why, and each asset's schedule progress |
+| **Journal register** | `/finance/journals` | The general ledger, filterable by status; `type` shows what posted each entry |
+| **Voucher register** | `/treasury/payments` | Receipts and payments together, with the unallocated balance in its own column |
+| **Voucher entry** | `/treasury/payments/new` | Allocation grid over open documents, oldest due first, with the unallocated figure computed in `Money` |
 | Sign-in | `/login` | |
+
+The sidebar is an accordion of five modules, each split into **التهيئة / العمليات / التقارير**
+— the division every large ERP settles on, because it maps to who uses a screen and how often.
+Screens that are planned but unbuilt are listed with a *قريباً* badge and **no `href` at all**.
+Not a disabled link: `pointer-events-none` stops a mouse click and leaves middle-click,
+keyboard focus and the screen-reader link list all pointing at a dead URL.
+`tests/unit/navigation.test.ts` asserts every `href` in the tree resolves to a real
+`page.tsx` on disk, so a link to a screen that does not exist fails the suite.
 
 Two conventions the entry screens share. Saving creates a **draft**; posting is a
 separate, separately permissioned action, because posting is what puts a document in
@@ -372,8 +383,15 @@ Stated plainly rather than discovered later:
   sales, procurement, inventory, treasury, financials and HR. The UI ships the
   dashboard, the sales register and invoice entry, the journal entry screen, the trial
   balance, the approval inbox, the stock card, bank reconciliation, the depreciation
-  run and sign-in. Procurement, payroll and the master-data maintenance screens are
-  still API-only.
+  run, the journal and voucher registers, voucher entry and sign-in. Procurement,
+  payroll and the master-data maintenance screens are still API-only, and appear in the
+  sidebar as *قريباً* rather than as links.
+- **Detail pages do not exist yet, and nothing pretends they do.** There is no invoice,
+  customer, supplier, account or employee detail screen. Until this commit the sales
+  register linked to `/sales/invoices/{id}` and global search pointed at six such routes —
+  all of them 404s reachable from a single click or an Enter key. The registers now render
+  those identifiers as plain text, and a search hit with no screen behind it renders as a
+  row rather than a link, labelled *لا توجد شاشة*. Less convenient and honest.
 - **Offline mode covers data entry, not the whole application.** Drafts auto-save to
   IndexedDB and queued submissions replay under an idempotency key, so the two entry
   screens work with no connection. Everything that *reads* — the dashboard, the

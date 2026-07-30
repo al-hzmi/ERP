@@ -112,7 +112,7 @@ export default async function SalesInvoicesPage({
       <Card>
         <CardHeader
           title="السجل"
-          description="اضغط على رقم الفاتورة لعرض تفاصيلها وقيدها المحاسبي"
+          description="مُرشَّح حسب الحالة. شاشة تفاصيل الفاتورة لم تُنفَّذ بعد"
           action={
             <nav className="flex flex-wrap gap-1" aria-label="تصفية حسب الحالة">
               {STATUS_FILTERS.map((filter) => {
@@ -167,12 +167,12 @@ export default async function SalesInvoicesPage({
                   return (
                     <tr key={invoice.id}>
                       <td>
-                        <Link
-                          href={`/sales/invoices/${invoice.id}`}
-                          className="bidi-isolate font-mono text-xs font-medium text-primary hover:underline"
-                        >
+                        {/* Not a link. The invoice detail page has not been built, and an
+                            anchor to it answered 404 — the same defect the sidebar had. It
+                            becomes a link the moment the page exists. */}
+                        <span className="bidi-isolate font-mono text-xs font-medium text-primary">
                           {invoice.documentNumber}
-                        </Link>
+                        </span>
                       </td>
                       <td className="max-w-[16rem]">
                         <p className="truncate">{invoice.counterparty.nameAr}</p>

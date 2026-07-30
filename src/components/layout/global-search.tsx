@@ -26,7 +26,15 @@ interface SearchHit {
   titleEn: string;
   subtitle: string | null;
   score: number;
-  href: string;
+  /**
+   * `null` when nothing has been built to navigate to.
+   *
+   * Six of the seven destinations this used to produce were routes that had never been
+   * written, so pressing Enter on a search result was a 404. The hit is still returned —
+   * it confirms the record exists and shows its code, name and balance — but it renders as
+   * a plain row rather than a link.
+   */
+  href: string | null;
 }
 
 const ENTITY_LABELS: Record<string, string> = {
@@ -95,7 +103,9 @@ export function GlobalSearch({
     }
     if (event.key === 'Enter') {
       const target = hits[highlighted];
-      if (target !== undefined) {
+      // Guarded, not assumed. A hit with no destination stays put instead of navigating to
+      // the string "null".
+      if (target?.href != null && target.href !== '') {
         window.location.href = target.href;
       }
     }
@@ -147,19 +157,9 @@ export function GlobalSearch({
             </p>
           ) : (
             <ul>
-              {hits.map((hit, index) => (
-                <li key={`${hit.entity}-${hit.id}`}>
-                  <Link
-                    href={hit.href}
-                    onClick={onClose}
-                    onMouseEnter={() => {
-                      setHighlighted(index);
-                    }}
-                    className={cn(
-                      'flex items-center gap-3 rounded-lg px-3 py-2.5 transition-colors',
-                      index === highlighted ? 'bg-accent' : 'hover:bg-accent/60',
-                    )}
-                  >
+              {hits.map((hit, index) => {
+                const body = (
+                  <>
                     <span className="shrink-0 rounded bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
                       {ENTITY_LABELS[hit.entity] ?? hit.entity}
                     </span>
@@ -172,9 +172,46 @@ export function GlobalSearch({
                         {hit.subtitle}
                       </span>
                     ) : null}
-                  </Link>
-                </li>
-              ))}
+                  </>
+                );
+
+                const rowClass = cn(
+                  'flex items-center gap-3 rounded-lg px-3 py-2.5 transition-colors',
+                  index === highlighted ? 'bg-accent' : 'hover:bg-accent/60',
+                );
+
+                return (
+                  <li key={`${hit.entity}-${hit.id}`}>
+                    {hit.href === null ? (
+                      // No screen to open. Shown, because confirming the record exists and
+                      // reading its code is most of what a search is for — but not as a link,
+                      // because a link that 404s is worse than no link at all.
+                      <div
+                        className={cn(rowClass, 'cursor-default')}
+                        onMouseEnter={() => {
+                          setHighlighted(index);
+                        }}
+                      >
+                        {body}
+                        <span className="shrink-0 rounded-full bg-muted px-1.5 py-px text-[9px] text-muted-foreground">
+                          لا توجد شاشة
+                        </span>
+                      </div>
+                    ) : (
+                      <Link
+                        href={hit.href}
+                        onClick={onClose}
+                        onMouseEnter={() => {
+                          setHighlighted(index);
+                        }}
+                        className={rowClass}
+                      >
+                        {body}
+                      </Link>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>
