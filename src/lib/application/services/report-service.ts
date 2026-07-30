@@ -204,12 +204,32 @@ export interface BalanceSheet {
  * to have been closed out — otherwise the sheet fails to balance for every day
  * of the year except 31 December.
  */
+/**
+ * Assets, liabilities and equity as at a date.
+ *
+ * ## Why the sign comes from `type` and not from `nature`
+ *
+ * This used `nature`, and it was wrong for exactly one class of account: a contra. Accumulated
+ * depreciation is `type: ASSET` with `nature: CREDIT`, so signing by nature produced a positive
+ * figure and *added* it to total assets — when reducing them is the entire purpose of a
+ * contra-asset. The sheet then failed to balance by twice the accumulated depreciation.
+ *
+ * Nothing caught it for nine migrations because nothing had ever posted to a contra account:
+ * migration 3 made them expressible, the seed created four, and they stayed at zero until the
+ * depreciation run shipped and credited one. The first balance sheet rendered after that was
+ * the first one that could have been wrong.
+ *
+ * Signing by type gives a contra its correct negative sign for free — a credit-natured ASSET
+ * yields `debit - credit < 0` — and needs no `isContra` flag, so a contra account added later
+ * cannot be forgotten. That is why it beats special-casing the flag.
+ */
 export async function getBalanceSheet(period: ReportPeriod): Promise<BalanceSheet> {
   const rows = await prisma.$queryRaw<
     { accountId: string; code: string; nameAr: string; nameEn: string; type: string; amount: string }[]
   >`
     SELECT a."id" AS "accountId", a."code", a."nameAr", a."nameEn", a."type"::text AS type,
-           (CASE WHEN a."nature" = 'DEBIT'
+           -- Signed by the account's TYPE, not its nature. See the note above this function.
+           (CASE WHEN a."type" = 'ASSET'
                  THEN SUM(l."debit")  - SUM(l."credit")
                  ELSE SUM(l."credit") - SUM(l."debit")
             END)::text AS amount
@@ -221,7 +241,7 @@ export async function getBalanceSheet(period: ReportPeriod): Promise<BalanceShee
        AND j."date" <= ${period.toDate}::date
        AND a."type" IN ('ASSET', 'LIABILITY', 'EQUITY')
        AND (${period.branchId ?? null}::uuid IS NULL OR j."branchId" = ${period.branchId ?? null}::uuid)
-     GROUP BY a."id", a."code", a."nameAr", a."nameEn", a."type", a."nature"
+     GROUP BY a."id", a."code", a."nameAr", a."nameEn", a."type"
      HAVING SUM(l."debit") <> 0 OR SUM(l."credit") <> 0
      ORDER BY a."code"
   `;

@@ -38,7 +38,7 @@ meaningfully: `sales` can raise an invoice but not post it, `auditor` can read
 everything and change nothing.
 
 ```bash
-npm test           # 522 tests (344 unit + 178 integration)
+npm test           # 532 tests (344 unit + 188 integration)
 npm run typecheck  # strict TypeScript, no `any`, no `@ts-ignore`
 npm run build      # production build
 ```
@@ -113,7 +113,7 @@ prisma/
 └── seed.ts + seed/           the data generator
 tests/
 ├── unit/                     344 tests, no database required
-└── integration/              178 tests against real PostgreSQL
+└── integration/              188 tests against real PostgreSQL
 ```
 
 Dependencies point inward. `domain/` imports nothing from `application/` or
@@ -216,6 +216,15 @@ only the application change that put every read path inside a tenant scope. See
 | **Customer card** | `/sales/customers/[id]` | Five-bucket ageing by days past due, open documents, recent vouchers |
 | **Suppliers** | `/procurement/suppliers` | The same table read the other way; `BOTH` appears in both registers |
 | **Supplier card** | `/procurement/suppliers/[id]` | Payable ageing and open exposure |
+| **Balance sheet** | `/finance/balance-sheet` | Assets = liabilities + equity, with the period result folded into equity |
+| **Income statement** | `/finance/income-statement` | Revenue and expenses for a period; margin is `null`, never 0%, on no revenue |
+| **Ageing** | `/finance/ageing` | Receivable and payable in one screen, bucketed by days past due |
+| **Inventory valuation** | `/inventory/valuation` | Behind the `costPrice` field grant in full — the report *is* cost data |
+| **Purchase invoices** | `/procurement/invoices` | Register over `postPurchaseInvoice`; entry stays API-only |
+| **Audit trail** | `/system/audit` | Filter by action, user, entity, date and correlation id |
+| **Users** | `/system/users` | Roles, lockout state and failed attempts; read-only by design |
+| **Roles & permissions** | `/system/roles` | The matrix rendered from the same constants authorisation checks against |
+| **Branches & warehouses** | `/org/branches` | Warehouses nested under their branch, default marked |
 | Sign-in | `/login` | |
 
 The sidebar is an accordion of five modules, each split into **التهيئة / العمليات / التقارير**

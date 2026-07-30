@@ -183,10 +183,20 @@ export const NAVIGATION: readonly NavModule[] = [
             labelEn: 'Trial Balance',
             icon: Scale,
           },
-          { labelAr: 'قائمة المركز المالي', labelEn: 'Balance Sheet', icon: FileSpreadsheet },
-          { labelAr: 'قائمة الدخل', labelEn: 'Income Statement', icon: FileSpreadsheet },
+          {
+            href: '/finance/balance-sheet',
+            labelAr: 'قائمة المركز المالي',
+            labelEn: 'Balance Sheet',
+            icon: FileSpreadsheet,
+          },
+          {
+            href: '/finance/income-statement',
+            labelAr: 'قائمة الدخل',
+            labelEn: 'Income Statement',
+            icon: FileSpreadsheet,
+          },
           { labelAr: 'دفتر الأستاذ العام', labelEn: 'General Ledger', icon: ScrollText },
-          { labelAr: 'أعمار الذمم', labelEn: 'Ageing Analysis', icon: Activity },
+          { href: '/finance/ageing', labelAr: 'أعمار الذمم', labelEn: 'Ageing Analysis', icon: Activity },
         ],
       },
     ],
@@ -203,7 +213,7 @@ export const NAVIGATION: readonly NavModule[] = [
           { href: '/inventory/products', labelAr: 'الأصناف', labelEn: 'Products', icon: Package },
           { labelAr: 'التصنيفات والماركات', labelEn: 'Categories & Brands', icon: Folders },
           { labelAr: 'وحدات القياس', labelEn: 'Units of Measure', icon: Boxes },
-          { labelAr: 'المستودعات', labelEn: 'Warehouses', icon: Warehouse },
+          { href: '/org/branches', labelAr: 'المستودعات', labelEn: 'Warehouses', icon: Warehouse },
         ],
       },
       {
@@ -225,7 +235,12 @@ export const NAVIGATION: readonly NavModule[] = [
         kind: 'reports',
         items: [
           { href: '/inventory/stock', labelAr: 'أرصدة المخزون', labelEn: 'Stock Balances', icon: Warehouse },
-          { labelAr: 'تقييم المخزون', labelEn: 'Inventory Valuation', icon: Coins },
+          {
+            href: '/inventory/valuation',
+            labelAr: 'تقييم المخزون',
+            labelEn: 'Inventory Valuation',
+            icon: Coins,
+          },
           { labelAr: 'حركة الأصناف', labelEn: 'Movement Analysis', icon: Activity },
           { labelAr: 'الأصناف الراكدة', labelEn: 'Slow-Moving Stock', icon: PackageSearch },
         ],
@@ -265,7 +280,12 @@ export const NAVIGATION: readonly NavModule[] = [
           { labelAr: 'عروض الأسعار', labelEn: 'Quotations', icon: FileText },
           { labelAr: 'أوامر البيع', labelEn: 'Sales Orders', icon: ShoppingCart },
           { labelAr: 'مرتجعات المبيعات', labelEn: 'Sales Returns', icon: ArrowLeftRight },
-          { labelAr: 'فواتير المشتريات', labelEn: 'Purchase Invoices', icon: FileText },
+          {
+            href: '/procurement/invoices',
+            labelAr: 'فواتير المشتريات',
+            labelEn: 'Purchase Invoices',
+            icon: FileText,
+          },
           { labelAr: 'أوامر الشراء', labelEn: 'Purchase Orders', icon: ShoppingCart },
         ],
       },
@@ -289,9 +309,19 @@ export const NAVIGATION: readonly NavModule[] = [
       {
         kind: 'setup',
         items: [
-          { labelAr: 'المستخدمون', labelEn: 'Users', icon: UserCog },
-          { labelAr: 'الأدوار والصلاحيات', labelEn: 'Roles & Permissions', icon: ShieldCheck },
-          { labelAr: 'الفروع والهيكل التنظيمي', labelEn: 'Branches & Org Units', icon: Building2 },
+          { href: '/system/users', labelAr: 'المستخدمون', labelEn: 'Users', icon: UserCog },
+          {
+            href: '/system/roles',
+            labelAr: 'الأدوار والصلاحيات',
+            labelEn: 'Roles & Permissions',
+            icon: ShieldCheck,
+          },
+          {
+            href: '/org/branches',
+            labelAr: 'الفروع والمستودعات',
+            labelEn: 'Branches & Warehouses',
+            icon: Building2,
+          },
           { labelAr: 'سياسات الاعتماد', labelEn: 'Approval Policies', icon: ClipboardCheck },
           { labelAr: 'إعدادات الضرائب', labelEn: 'Tax Settings', icon: Percent },
           { labelAr: 'تسلسل الترقيم', labelEn: 'Number Sequences', icon: ListTree },
@@ -313,7 +343,7 @@ export const NAVIGATION: readonly NavModule[] = [
       {
         kind: 'reports',
         items: [
-          { labelAr: 'سجل التدقيق', labelEn: 'Audit Trail', icon: Fingerprint },
+          { href: '/system/audit', labelAr: 'سجل التدقيق', labelEn: 'Audit Trail', icon: Fingerprint },
           { labelAr: 'سجل دخول المستخدمين', labelEn: 'Sign-in History', icon: Activity },
           { labelAr: 'تقرير الضريبة', labelEn: 'VAT Report', icon: FileSpreadsheet },
         ],
