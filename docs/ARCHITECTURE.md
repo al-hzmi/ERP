@@ -591,13 +591,35 @@ Ordered by what a real deployment would need next:
     on the one column a reader scans for a discrepancy — or pay a `Decimal` allocation per row
     to reach the same answer more slowly. The window's ordering matches the query's, or the
     running balance would belong to a different sequence of rows than the one displayed.
-12. Physical stock count. Deliberately not built with the rest: it is the only screen in this
-    round with no service behind it, and the reason is that it needs its own persistence. A
-    count sheet must freeze the expected quantity at the moment counting begins — comparing a
-    count against a balance that moved while people were counting produces variances that are
-    arithmetic artefacts, and a warehouse manager cannot tell those from real losses. That is a
-    migration with two tables and their RLS policies, which migration 009's deploy assertion
-    now requires, and it deserves its own change rather than being appended to a UI commit.
+12. ~~Physical stock count.~~ Done — migration 010, and the first tables written *after*
+    migration 009's deploy assertion existed. That is worth recording: adding them without
+    their policies would have failed the next `migrate deploy` with both table names in the
+    error, which is exactly what the assertion is for.
+
+    The whole feature rests on one decision. `expectedQuantity` is written when the sheet is
+    **opened** and never recomputed. The naive alternative — compare the typed count against
+    `stock_levels` at save time — produces variances that are arithmetic artefacts: a line
+    counted at 09:00 and saved at 16:00 is measured against a balance that absorbed a whole
+    day of sales. The manager cannot tell those from real losses, and a count whose entire
+    purpose is finding real losses becomes noise. `unitCostAtOpen` is frozen for the same
+    reason: valuing a shortage at a cost that moved after counting began prices the loss at
+    something the company never held.
+
+    Freezing is enforced by a trigger, not by the service keeping its word. A repair script or
+    a future refactor cannot quietly unfreeze it, and the integration test proves it by
+    updating the row directly — the only version of that test worth having.
+
+    `countedQuantity` is nullable and zero is not null. An empty shelf is a count of zero and
+    usually the most important finding on the sheet; a line nobody reached is unknown.
+    Collapsing them would turn an abandoned afternoon into a total write-down of everything
+    untouched.
+
+    Variances post through `applyAdjustment` — the same function the manual adjustment screen
+    calls — inside one transaction, all-or-nothing. `recordAdjustment` was split into a
+    transaction-owning wrapper and that in-transaction core precisely so this could reuse the
+    path rather than reimplement it: a second implementation would be a second place for the
+    journal's direction, the costing of an increase and the zero-value refusal to drift, and
+    the drift would surface as a count whose adjustments differ from an identical manual one.
 13. Partition maintenance job calling `erp_ensure_year_partition` ahead of time.
    Deliberately last: migration 2 pre-creates yearly partitions through 2032 and
    every parent has a DEFAULT partition, so an out-of-range insert is slower rather

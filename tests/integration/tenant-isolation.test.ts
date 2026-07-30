@@ -86,6 +86,11 @@ const TENANT_SCOPED_TABLES = [
   'payroll_lines',
   'approval_steps',
   'approval_actions',
+  // Added by migration 010, and the first tables written after migration 009's deploy
+  // assertion existed — so they arrived with their policies rather than needing a later
+  // migration to fix them, which is what that assertion is for.
+  'stock_counts',
+  'stock_count_lines',
 ] as const;
 
 interface PolicyRow {

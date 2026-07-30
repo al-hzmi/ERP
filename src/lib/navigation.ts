@@ -247,7 +247,12 @@ export const NAVIGATION: readonly NavModule[] = [
             labelEn: 'Stock Adjustments',
             icon: PackageSearch,
           },
-          { labelAr: 'الجرد الفعلي', labelEn: 'Physical Count', icon: ClipboardCheck },
+          {
+            href: '/inventory/counts',
+            labelAr: 'الجرد الفعلي',
+            labelEn: 'Physical Count',
+            icon: ClipboardCheck,
+          },
           { labelAr: 'أوامر التجميع', labelEn: 'Assembly Orders', icon: Truck },
         ],
       },

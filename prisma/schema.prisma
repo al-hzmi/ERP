@@ -96,6 +96,8 @@ model Tenant {
   payrollLines        PayrollLine[]
   approvalSteps       ApprovalStep[]
   approvalActions     ApprovalAction[]
+  stockCounts         StockCount[]
+  stockCountLines     StockCountLine[]
 
   @@index([isActive])
   @@map("tenants")
@@ -424,6 +426,7 @@ model Branch {
   usersDefaulting    User[]              @relation("UserDefaultBranch")
   userRoles          UserRole[]
   fixedAssets        FixedAsset[]
+  stockCounts        StockCount[]
 
   @@unique([tenantId, code])
   @@index([tenantId, isActive])
@@ -453,6 +456,7 @@ model Warehouse {
   movements          InventoryMovement[] @relation("MovementWarehouse")
   movementsFrom      InventoryMovement[] @relation("MovementFromWarehouse")
   movementsTo        InventoryMovement[] @relation("MovementToWarehouse")
+  stockCounts        StockCount[]
 
   @@unique([tenantId, code])
   @@index([tenantId, branchId, isActive])
@@ -818,6 +822,7 @@ model Product {
   movements     InventoryMovement[]
   stockLevels   StockLevel[]
   costLayers    CostLayer[]
+  countLines    StockCountLine[]
 
   @@unique([tenantId, sku])
   @@index([tenantId, categoryId, isActive])
@@ -1463,6 +1468,59 @@ model DepreciationSchedule {
   @@map("depreciation_schedules")
 }
 
+model StockCount {
+  id            String           @id @default(uuid()) @db.Uuid
+  tenantId      String           @db.Uuid
+  countNumber   String           @db.VarChar(32)
+  warehouseId   String           @db.Uuid
+  branchId      String           @db.Uuid
+  status        StockCountStatus @default(COUNTING)
+  countDate     DateTime         @db.Date
+  notes         String?          @db.VarChar(512)
+  openedById    String           @db.Uuid
+  openedAt      DateTime         @default(now()) @db.Timestamptz(6)
+  finalisedById String?          @db.Uuid
+  finalisedAt   DateTime?        @db.Timestamptz(6)
+  updatedAt     DateTime         @updatedAt @db.Timestamptz(6)
+
+  tenant    Tenant           @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  warehouse Warehouse        @relation(fields: [warehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  branch    Branch           @relation(fields: [branchId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lines     StockCountLine[]
+
+  @@unique([tenantId, countNumber])
+  @@index([tenantId, warehouseId, status])
+  @@map("stock_counts")
+}
+
+model StockCountLine {
+  id        String @id @default(uuid()) @db.Uuid
+  tenantId  String @db.Uuid
+  countId   String @db.Uuid
+  productId String @db.Uuid
+  /// The balance at the instant the sheet was opened, frozen. Comparing a count against a
+  /// balance that moved while people were counting produces variances that are arithmetic
+  /// artefacts, and nobody can tell those from real losses.
+  expectedQuantity Decimal  @db.Decimal(19, 4)
+  /// NULL until someone counts this line. Zero is a legitimate count and means the shelf was
+  /// empty, so the two cannot share a representation.
+  countedQuantity  Decimal? @db.Decimal(19, 4)
+  /// The average cost at open, frozen alongside the quantity for the same reason.
+  unitCostAtOpen   Decimal  @db.Decimal(19, 4)
+  /// Set when the variance is posted, so a finalised line points at its movement.
+  adjustmentMovementId String? @db.Uuid
+  countedById String?   @db.Uuid
+  countedAt   DateTime? @db.Timestamptz(6)
+
+  tenant  Tenant     @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  count   StockCount @relation(fields: [countId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  product Product    @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([countId, productId])
+  @@index([tenantId, countId])
+  @@map("stock_count_lines")
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 //  ENUMS
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1587,6 +1645,15 @@ enum ApprovalStatus {
   PENDING
   APPROVED
   REJECTED
+  CANCELLED
+}
+
+enum StockCountStatus {
+  /// Sheet open, quantities being entered.
+  COUNTING
+  /// Variances posted as stock adjustments. Terminal.
+  COMPLETED
+  /// Abandoned without posting. Terminal.
   CANCELLED
 }
 

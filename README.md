@@ -22,7 +22,7 @@ cp .env.example .env        # then set AUTH_SECRET and ENCRYPTION_KEY
 #    openssl rand -hex 32      -> ENCRYPTION_KEY
 
 # 3. Database (PostgreSQL 15+)
-npm run db:migrate          # applies all nine migrations
+npm run db:migrate          # applies all ten migrations
 npm run db:seed             # generates and verifies a full demo company
 
 # 4. Run
@@ -38,7 +38,7 @@ meaningfully: `sales` can raise an invoice but not post it, `auditor` can read
 everything and change nothing.
 
 ```bash
-npm test           # 532 tests (344 unit + 188 integration)
+npm test           # 549 tests (344 unit + 205 integration)
 npm run typecheck  # strict TypeScript, no `any`, no `@ts-ignore`
 npm run build      # production build
 ```
@@ -109,18 +109,18 @@ src/
 └── styles/
 prisma/
 ├── schema.prisma             7 bounded contexts
-├── migrations/               9 migrations (see below)
+├── migrations/               10 migrations (see below)
 └── seed.ts + seed/           the data generator
 tests/
 ├── unit/                     344 tests, no database required
-└── integration/              188 tests against real PostgreSQL
+└── integration/              205 tests against real PostgreSQL
 ```
 
 Dependencies point inward. `domain/` imports nothing from `application/` or
 `infrastructure/`, which is why the entire accounting behaviour of the system is
 testable without a database.
 
-### The nine migrations
+### The ten migrations
 
 1. **`20260101000000_init`** — the schema Prisma generates.
 2. **`20260101000001_partitioning_constraints_triggers`** — everything Prisma
@@ -156,6 +156,12 @@ testable without a database.
    entire cash movement. It also asserts, at deploy time, that *every* table either has a
    tenant-isolation policy or is on an explicit exempt list with a stated reason, so a new
    child table added without one fails the deploy instead of waiting to be noticed.
+10. **`20260804000000_physical_stock_count`** — `stock_counts` and `stock_count_lines`, the
+   first tables written after migration 9's deploy assertion existed, so they arrived with
+   their policies rather than needing a later migration to fix them. `expectedQuantity` and
+   `unitCostAtOpen` are frozen at open by a trigger, not by convention: a variance measured
+   against a balance that moved during counting is an arithmetic artefact, and freezing has to
+   be a property of the database for that to hold.
 
 Migration 4 installed the policies; making them *apply* took no further migration,
 only the application change that put every read path inside a tenant scope. See
@@ -229,6 +235,7 @@ only the application change that put every read path inside a tenant scope. See
 | **General ledger** | `/finance/general-ledger` | One account over a period, opening balance and a running balance computed in SQL |
 | **Stock transfers** | `/inventory/transfers` | Entry and register together; no journal, because the value never leaves |
 | **Stock adjustments** | `/inventory/adjustments` | Signed quantity; movement and its gain/loss journal in one transaction |
+| **Physical count** | `/inventory/counts` | Register and sheet; expected quantities frozen at open, variances posted as adjustments |
 | Sign-in | `/login` | |
 
 The sidebar is an accordion of five modules, each split into **التهيئة / العمليات / التقارير**
@@ -407,12 +414,15 @@ Stated plainly rather than discovered later:
   stock balances, the customer and supplier registers and cards, and sign-in. Purchase
   documents, payroll and the remaining master-data maintenance screens are still API-only
   and appear in the sidebar as *قريباً* rather than as links.
-- **Physical stock count has no screen and no tables yet.** Unlike everything else shipped so
-  far, it has no service to put a screen on: a count needs its own persistence — a sheet, its
-  lines, and the expected quantity frozen at the moment counting began — because comparing a
-  count against a balance that moved while people were counting produces variances that are
-  arithmetic artefacts. That is a migration with its own RLS policies (migration 009's deploy
-  assertion refuses a new table without one), not a page.
+- **A physical count posts through the adjustment path, not around it.** Finalising a sheet
+  calls the same `applyAdjustment` the manual adjustment screen calls, inside one transaction.
+  All-or-nothing: a sheet that posted forty of fifty variances and then hit a negative-stock
+  refusal would leave a completed count whose adjustments are partial, and re-running it would
+  double the forty that landed.
+- **An uncounted count line is not a zero.** A blank line means nobody reached it; a typed `0`
+  means the shelf was empty, which is usually the most important finding on the sheet. They are
+  stored, submitted and displayed differently, and finalisation skips the blanks — treating
+  them as zero would turn an abandoned afternoon into a total write-down.
 - **Some detail pages still do not exist, and nothing pretends they do.** Product,
   customer and supplier cards now exist and global search links to them again. Invoice,
   account and employee detail screens do not: those identifiers render as plain text and a

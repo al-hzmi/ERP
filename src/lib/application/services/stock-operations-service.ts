@@ -322,6 +322,25 @@ export interface AdjustmentOutcome {
 export async function recordAdjustment(
   input: AdjustmentInput,
 ): Promise<Result<AdjustmentOutcome, DomainError>> {
+  return withTransaction((tx) => applyAdjustment(tx, input));
+}
+
+/**
+ * The adjustment itself, inside a caller's transaction.
+ *
+ * Split out so the stock-count service can post a sheet's variances through *this* code path
+ * rather than a parallel one. It matters: a second implementation would be a second place for
+ * the journal's direction, the costing of an increase, and the zero-value refusal to drift —
+ * and the drift would show up as a stock count whose adjustments differ from an identical
+ * manual one.
+ *
+ * Nesting `withTransaction` inside another transaction would open a second connection and a
+ * second transaction, so the wrapper above owns the boundary and this function never opens one.
+ */
+export async function applyAdjustment(
+  tx: TransactionClient,
+  input: AdjustmentInput,
+): Promise<Result<AdjustmentOutcome, DomainError>> {
   const date = DateOnly.create(input.date);
   if (!date.ok) return date;
 
@@ -358,7 +377,7 @@ export async function recordAdjustment(
     );
   }
 
-  return withTransaction(async (tx) => {
+  {
     const context = await loadContext(tx, input.tenantId);
     if (!context.ok) return context;
 
@@ -544,5 +563,5 @@ export async function recordAdjustment(
       value: value.toString(),
       direction: isDecrease ? ('DECREASE' as const) : ('INCREASE' as const),
     });
-  });
+  }
 }

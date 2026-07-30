@@ -67,6 +67,7 @@ describe('the navigation tree', () => {
       '/finance/journals/new',
       '/finance/trial-balance',
       '/inventory/adjustments',
+      '/inventory/counts',
       '/inventory/products',
       '/inventory/stock',
       '/inventory/stock-card',
