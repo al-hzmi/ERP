@@ -22,6 +22,7 @@ import {
   Warehouse,
 } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
+import { OfflineBar } from './offline-bar';
 import { cn } from '@/lib/utils/cn';
 import { useUiStore } from '@/store/ui-store';
 import { GlobalSearch } from './global-search';
@@ -245,6 +246,10 @@ export function AppShell({
             ) : null}
           </div>
         </header>
+
+        {/* Above the content rather than pinned: a banner that overlays the page hides
+            the field someone is typing into, and this one appears while they type. */}
+        <OfflineBar />
 
         <main className="flex-1 px-6 py-6">{children}</main>
       </div>

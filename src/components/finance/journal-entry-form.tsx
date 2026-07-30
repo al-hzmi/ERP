@@ -12,7 +12,10 @@ import {
   MANUAL_JOURNAL_TYPES,
   MANUAL_JOURNAL_TYPE_LABELS_AR,
 } from '@/lib/domain/accounting/manual-journal';
-import { apiFetch, apiPost, type ApiError } from '@/lib/utils/api-client';
+import { DraftBanner } from '@/components/ui/draft-banner';
+import { useDraftAutosave, useOnlineStatus } from '@/lib/offline/hooks';
+import { submitOrQueue } from '@/lib/offline/sync';
+import { apiFetch, type ApiError } from '@/lib/utils/api-client';
 import { formatMoney } from '@/lib/utils/format';
 import {
   isJournalLineContradictory,
@@ -69,6 +72,29 @@ export function JournalEntryForm(): JSX.Element {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
   const [attempted, setAttempted] = useState(false);
+  const [queued, setQueued] = useState(false);
+
+  const online = useOnlineStatus();
+
+  const draftState = useMemo(
+    () => ({ type, date, descriptionAr, branchId, postImmediately, lines }),
+    [type, date, descriptionAr, branchId, postImmediately, lines],
+  );
+
+  const draft = useDraftAutosave('journal-entry', draftState);
+
+  function restoreDraft(): void {
+    const state = draft.recovered?.state;
+    if (state === undefined) return;
+
+    setType(state.type);
+    setDate(state.date);
+    setDescriptionAr(state.descriptionAr);
+    setBranchId(state.branchId);
+    setPostImmediately(state.postImmediately);
+    setLines(state.lines);
+    draft.dismissRecovered();
+  }
 
   useEffect(() => {
     void apiFetch<FormOptions>('/api/master-data/form-options').then((result) => {
@@ -108,7 +134,8 @@ export function JournalEntryForm(): JSX.Element {
     setSubmitting(true);
     setError(null);
 
-    const result = await apiPost<{ journalId: string; entryNumber: string }>(
+    const result = await submitOrQueue<{ journalId: string; entryNumber: string }>(
+      'journal-entry',
       '/api/finance/journals',
       {
         type,
@@ -129,8 +156,16 @@ export function JournalEntryForm(): JSX.Element {
       },
     );
 
-    if (!result.ok) {
-      setError(result.error);
+    if (result.outcome === 'refused') {
+      setError({ code: result.code, messageAr: result.messageAr, messageEn: result.messageAr });
+      setSubmitting(false);
+      return;
+    }
+
+    draft.discard();
+
+    if (result.outcome === 'queued') {
+      setQueued(true);
       setSubmitting(false);
       return;
     }
@@ -162,6 +197,30 @@ export function JournalEntryForm(): JSX.Element {
 
   return (
     <form onSubmit={(event) => void onSubmit(event)} className="space-y-6" noValidate>
+      {draft.recovered !== null ? (
+        <DraftBanner
+          savedAt={draft.recovered.updatedAt}
+          onRestore={restoreDraft}
+          onDiscard={() => {
+            draft.discard();
+            draft.dismissRecovered();
+          }}
+        />
+      ) : null}
+
+      {queued ? (
+        <div
+          role="status"
+          className="rounded-lg border border-warning/30 bg-warning/10 px-4 py-3 text-sm"
+        >
+          <span className="font-medium">تم حفظ القيد في طابور الإرسال.</span>{' '}
+          <span className="text-muted-foreground">
+            لم يُسجَّل في الدفتر بعد ولم يُخصَّص له رقم — سيتم إرساله تلقائياً عند عودة
+            الاتصال.
+          </span>
+        </div>
+      ) : null}
+
       {/* The answer to the only question this screen exists to answer, kept at the
           top where it is legible without scrolling past the grid. */}
       <div
@@ -392,6 +451,17 @@ export function JournalEntryForm(): JSX.Element {
               {postImmediately ? 'حفظ وترحيل' : 'حفظ كمسودة'}
             </Button>
           </div>
+
+          {!online || draft.savedAt !== null ? (
+            <p className="text-end text-xs text-muted-foreground">
+              {draft.savedAt !== null
+                ? draft.durable
+                  ? 'المسودة محفوظة على هذا الجهاز'
+                  : 'المسودة محفوظة في هذه النافذة فقط'
+                : null}
+              {!online ? <> · لا يوجد اتصال — سيُرسل عند العودة</> : null}
+            </p>
+          ) : null}
         </CardBody>
       </Card>
     </form>

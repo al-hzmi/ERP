@@ -22,7 +22,7 @@ cp .env.example .env        # then set AUTH_SECRET and ENCRYPTION_KEY
 #    openssl rand -hex 32      -> ENCRYPTION_KEY
 
 # 3. Database (PostgreSQL 15+)
-npm run db:migrate          # applies all five migrations
+npm run db:migrate          # applies all six migrations
 npm run db:seed             # generates and verifies a full demo company
 
 # 4. Run
@@ -38,7 +38,7 @@ meaningfully: `sales` can raise an invoice but not post it, `auditor` can read
 everything and change nothing.
 
 ```bash
-npm test           # 340 tests (244 unit + 96 integration)
+npm test           # 375 tests (269 unit + 106 integration)
 npm run typecheck  # strict TypeScript, no `any`, no `@ts-ignore`
 npm run build      # production build
 ```
@@ -109,18 +109,18 @@ src/
 └── styles/
 prisma/
 ├── schema.prisma             7 bounded contexts
-├── migrations/               5 migrations (see below)
+├── migrations/               6 migrations (see below)
 └── seed.ts + seed/           the data generator
 tests/
-├── unit/                     244 tests, no database required
-└── integration/              96 tests against real PostgreSQL
+├── unit/                     269 tests, no database required
+└── integration/              106 tests against real PostgreSQL
 ```
 
 Dependencies point inward. `domain/` imports nothing from `application/` or
 `infrastructure/`, which is why the entire accounting behaviour of the system is
 testable without a database.
 
-### The five migrations
+### The six migrations
 
 1. **`20260101000000_init`** — the schema Prisma generates.
 2. **`20260101000001_partitioning_constraints_triggers`** — everything Prisma
@@ -138,6 +138,9 @@ testable without a database.
 5. **`20260730000000_outbox_runner_and_shared_rate_limits`** — claim columns on
    `outbox_events`, so a claim can outlive the transaction that took it; and the
    shared rate-limit counters with their sliding-window function.
+6. **`20260731000000_request_idempotency`** — the first outcome of each client-keyed
+   mutation, so the offline queue can replay a submission whose response was lost
+   without creating a second invoice.
 
 Migration 4 installed the policies; making them *apply* took no further migration,
 only the application change that put every read path inside a tenant scope. See
@@ -168,6 +171,8 @@ only the application change that put every read path inside a tenant scope. See
 | Live invoice totals | `utils/invoice-draft.ts` | The entry form totals through the *same* `calculateInvoice` the API posts through, so the figure read before saving is the figure saved — and a half-typed line is excluded rather than counted as zero |
 | Approval workflow | `application/services/approval-service.ts` | Role-per-step, initiator excluded, one decision per step, and `SERIALIZABLE` so two approvers racing on a shared inbox cannot both advance it |
 | The scope seam for pages | `api/page.ts` | What `apiHandler` is to a route: redirect, then bind the tenant, in one place a server component cannot forget |
+| Idempotent replay | `api/idempotency.ts` | The first outcome of a keyed mutation, returned verbatim for repeats — and refused outright when a key is reused with a different body, because that would answer with the wrong document's number |
+| The offline queue | `offline/queue.ts` | Oldest first, stop at the first undelivered submission, and one key per submission reused on every attempt: the three rules that keep a retry from becoming a second invoice |
 
 ---
 
@@ -189,6 +194,44 @@ separate, separately permissioned action, because posting is what puts a documen
 the ledger and in the ZATCA hash chain. And the arithmetic on screen comes from the
 domain — `calculateInvoice` for invoices, scale-4 `bigint` for the journal balance —
 so no total is computed twice by two implementations that might disagree.
+
+---
+
+## Working offline
+
+The two entry screens keep working with no connection. Three pieces make that true, and
+each is narrower than it sounds:
+
+**Drafts.** Form state auto-saves to IndexedDB as it is typed and is *offered back* on
+return, never applied silently — a user who came to raise a new invoice should not find
+themselves editing last Thursday's without being told. One draft per screen, kept for
+seven days.
+
+**A submission queue.** Submitting with no connection queues the request and replays it
+on reconnect, oldest first, halting at the first one that cannot be delivered so the
+order the user created is the order the ledger receives. A refusal — a closed period, an
+inactive product — is not retried; it is kept with its reason attached so someone can see
+what was rejected.
+
+**An idempotency key per submission**, generated once and reused on every attempt. This
+is the part that matters: from the client, "never arrived" and "arrived, and the reply was
+lost" are indistinguishable, and guessing wrong in the second case creates a second
+invoice with a second document number. The server records the first outcome against the
+key and returns it verbatim for repeats, which makes the retry safe in all three cases.
+It refuses a key reused with a different body rather than answering with the first
+document's number.
+
+What is deliberately *not* offline is everything that reads. The service worker never
+serves an API response from a cache — a stale balance presented as a current one is worse
+than an error — and never mediates a non-GET request at all.
+
+```
+Idempotency-Key: <uuid>      # on POST /api/sales/invoices, POST /api/finance/journals
+IDEMPOTENCY_TTL_SECONDS      # how long a key is honoured; default 86400
+```
+
+The records are swept by the outbox worker, which is already the deployment's scheduled
+process.
 
 ---
 
@@ -236,11 +279,15 @@ immediately.
 
 **ZATCA Phase 2** — every posted sales invoice produces a UUID, a UBL 2.1 XML
 document, a SHA-256 hash chained to its predecessor, and a Base64 TLV QR
-payload. What is deliberately *not* implemented is the ECDSA signature (QR tags
-7–9) and the clearance API call: both require a Cryptographic Stamp Identifier
-issued by ZATCA to a specific taxpayer after onboarding, which cannot be
-fabricated. The envelope is built so signing is an addition rather than a
-rewrite.
+payload. What is *not* implemented is the ECDSA signature (QR tags 7–9) and the
+clearance API call, and that is now a scope decision rather than a gap: both require a
+Cryptographic Stamp Identifier issued by ZATCA to a specific taxpayer after onboarding,
+and this is a reference implementation rather than a system that will invoice one.
+
+So state it plainly: **Phase 2 envelope, deliberately unsigned, not a certified
+integration.** Do not put this in front of a real taxpayer's invoices as it stands. The
+envelope was built so that signing is an addition rather than a rewrite, which is still
+true for anyone who picks the item up.
 
 ---
 
@@ -300,5 +347,14 @@ Stated plainly rather than discovered later:
   dashboard, the sales register and invoice entry, the journal entry screen, the trial
   balance, the approval inbox, the stock card and sign-in. Procurement, treasury,
   payroll and the master-data maintenance screens are still API-only.
-- **PWA offline mode is not implemented.** Auto-save drafts to IndexedDB and
-  background sync are designed for but not built.
+- **Offline mode covers data entry, not the whole application.** Drafts auto-save to
+  IndexedDB and queued submissions replay under an idempotency key, so the two entry
+  screens work with no connection. Everything that *reads* — the dashboard, the
+  registers, the reports — needs the network, deliberately: the service worker will not
+  serve an API response from a cache, because a stale balance presented as a current one
+  is worse than an error.
+- **The service worker caches only what cannot go stale.** Build output, whose URLs are
+  content-hashed, and the offline fallback page. It never touches a non-GET request and
+  never caches `/api/` — a cached tenant-scoped response could otherwise be served to the
+  next person to sign in on the same device.
+

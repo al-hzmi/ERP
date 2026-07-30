@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const drainOutbox = vi.fn();
 const reclaimAllStaleClaims = vi.fn();
 const sweepRateLimits = vi.fn();
+const sweepIdempotencyRecords = vi.fn();
 
 vi.mock('@/lib/infrastructure/events/event-bus', () => ({
   eventBus: {
@@ -26,6 +27,10 @@ vi.mock('@/lib/infrastructure/events/event-bus', () => ({
 
 vi.mock('@/lib/infrastructure/security/rate-limit', () => ({
   sweepRateLimits: () => sweepRateLimits() as unknown,
+}));
+
+vi.mock('@/lib/api/idempotency', () => ({
+  sweepIdempotencyRecords: (...args: unknown[]) => sweepIdempotencyRecords(...args) as unknown,
 }));
 
 vi.mock('@/lib/infrastructure/logging/logger', () => ({
@@ -46,6 +51,7 @@ beforeEach(() => {
   drainOutbox.mockReset().mockResolvedValue(emptyReport);
   reclaimAllStaleClaims.mockReset().mockResolvedValue({ reclaimed: 0, deadLettered: 0 });
   sweepRateLimits.mockReset().mockResolvedValue(0);
+  sweepIdempotencyRecords.mockReset().mockResolvedValue(0);
 });
 
 afterEach(() => {
@@ -109,6 +115,19 @@ describe('OutboxRunner.tick', () => {
     await runner.tick();
 
     expect(sweepRateLimits).toHaveBeenCalledTimes(1);
+  });
+
+  it('sweeps idempotency records on the same cadence, with the configured TTL', async () => {
+    // Both sweeps ride the same tick counter: they exist for the same reason — a table
+    // that grows by one row per request with no other scheduled process to trim it.
+    const runner = new OutboxRunner({ sweepEveryTicks: 2, idempotencyTtlSeconds: 3600 });
+
+    await runner.tick();
+    expect(sweepIdempotencyRecords).not.toHaveBeenCalled();
+
+    await runner.tick();
+
+    expect(sweepIdempotencyRecords).toHaveBeenCalledWith(3600);
   });
 });
 

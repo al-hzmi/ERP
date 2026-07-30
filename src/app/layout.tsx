@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from 'next';
+import { ServiceWorkerRegistrar } from '@/components/providers/service-worker-registrar';
 import { IBM_Plex_Mono, IBM_Plex_Sans_Arabic } from 'next/font/google';
 import type { ReactNode } from 'react';
 import '@/styles/globals.css';
@@ -66,6 +67,11 @@ export const metadata: Metadata = {
   },
   description: 'نظام محاسبي ومالي متكامل — متوافق مع المعايير الدولية وهيئة الزكاة والضريبة والجمارك',
   robots: { index: false, follow: false },
+  manifest: '/manifest.webmanifest',
+  // Installable, so a warehouse or a site office can open it from the home screen and
+  // keep entering drafts when the connection goes.
+  appleWebApp: { capable: true, title: 'ERP', statusBarStyle: 'default' },
+  icons: { icon: '/icon.svg', apple: '/icon.svg' },
 };
 
 export const viewport: Viewport = {
@@ -96,7 +102,10 @@ export default function RootLayout({ children }: { children: ReactNode }): JSX.E
           }}
         />
       </head>
-      <body className="min-h-screen bg-background font-sans">{children}</body>
+      <body className="min-h-screen bg-background font-sans">
+        {children}
+        <ServiceWorkerRegistrar />
+      </body>
     </html>
   );
 }
