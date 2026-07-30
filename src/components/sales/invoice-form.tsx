@@ -9,7 +9,10 @@ import { EntityPicker } from '@/components/ui/entity-picker';
 import { Field } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
-import { apiFetch, apiPost, type ApiError } from '@/lib/utils/api-client';
+import { DraftBanner } from '@/components/ui/draft-banner';
+import { useDraftAutosave, useOnlineStatus } from '@/lib/offline/hooks';
+import { submitOrQueue } from '@/lib/offline/sync';
+import { apiFetch, type ApiError } from '@/lib/utils/api-client';
 import { formatMoney } from '@/lib/utils/format';
 import {
   isLineComplete,
@@ -76,6 +79,62 @@ export function InvoiceForm(): JSX.Element {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
   const [attempted, setAttempted] = useState(false);
+  const [queued, setQueued] = useState(false);
+
+  const online = useOnlineStatus();
+
+  /**
+   * The shape persisted as a draft.
+   *
+   * Includes the picker labels, not just their ids: a restored draft that showed a bare
+   * uuid where the customer's name should be would be worse than no draft at all, and
+   * resolving the name needs a network the whole feature exists to do without.
+   */
+  const draftState = useMemo(
+    () => ({
+      counterpartyId,
+      counterpartyLabel,
+      branchId,
+      warehouseId,
+      issueDate,
+      dueDate,
+      currency,
+      notes,
+      lines,
+      productLabels,
+    }),
+    [
+      counterpartyId,
+      counterpartyLabel,
+      branchId,
+      warehouseId,
+      issueDate,
+      dueDate,
+      currency,
+      notes,
+      lines,
+      productLabels,
+    ],
+  );
+
+  const draft = useDraftAutosave('sales-invoice', draftState);
+
+  function restoreDraft(): void {
+    const state = draft.recovered?.state;
+    if (state === undefined) return;
+
+    setCounterpartyId(state.counterpartyId);
+    setCounterpartyLabel(state.counterpartyLabel);
+    setBranchId(state.branchId);
+    setWarehouseId(state.warehouseId);
+    setIssueDate(state.issueDate);
+    setDueDate(state.dueDate);
+    setCurrency(state.currency);
+    setNotes(state.notes);
+    setLines(state.lines);
+    setProductLabels(state.productLabels);
+    draft.dismissRecovered();
+  }
 
   useEffect(() => {
     void apiFetch<FormOptions>('/api/master-data/form-options').then((result) => {
@@ -124,7 +183,11 @@ export function InvoiceForm(): JSX.Element {
     setSubmitting(true);
     setError(null);
 
-    const result = await apiPost<{ documentId: string; documentNumber: string }>(
+    // Goes through the offline queue rather than straight to `fetch`, so a submission
+    // made with no connection is kept and replayed under an idempotency key instead of
+    // being lost — or worse, sent twice.
+    const result = await submitOrQueue<{ documentId: string; documentNumber: string }>(
+      'sales-invoice',
       '/api/sales/invoices',
       {
         counterpartyId,
@@ -138,8 +201,20 @@ export function InvoiceForm(): JSX.Element {
       },
     );
 
-    if (!result.ok) {
-      setError(result.error);
+    if (result.outcome === 'refused') {
+      setError({ code: result.code, messageAr: result.messageAr, messageEn: result.messageAr });
+      setSubmitting(false);
+      return;
+    }
+
+    // The draft has served its purpose either way: accepted means it is filed, queued
+    // means the queue owns it now and restoring it later would create a second copy.
+    draft.discard();
+
+    if (result.outcome === 'queued') {
+      // Stays on the page. Navigating to the register would show a list that does not
+      // contain the invoice, which reads as the submission having failed.
+      setQueued(true);
       setSubmitting(false);
       return;
     }
@@ -168,6 +243,30 @@ export function InvoiceForm(): JSX.Element {
 
   return (
     <form onSubmit={(event) => void onSubmit(event)} className="space-y-6" noValidate>
+      {draft.recovered !== null ? (
+        <DraftBanner
+          savedAt={draft.recovered.updatedAt}
+          onRestore={restoreDraft}
+          onDiscard={() => {
+            draft.discard();
+            draft.dismissRecovered();
+          }}
+        />
+      ) : null}
+
+      {queued ? (
+        <div
+          role="status"
+          className="rounded-lg border border-warning/30 bg-warning/10 px-4 py-3 text-sm"
+        >
+          <span className="font-medium">تم حفظ الفاتورة في طابور الإرسال.</span>{' '}
+          <span className="text-muted-foreground">
+            لم تُسجَّل في النظام بعد ولم يُخصَّص لها رقم — سيتم إرسالها تلقائياً عند عودة
+            الاتصال.
+          </span>
+        </div>
+      ) : null}
+
       <Card>
         <CardHeader title="بيانات الفاتورة" description="العميل والفرع والتواريخ" />
         <CardBody className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -437,6 +536,15 @@ export function InvoiceForm(): JSX.Element {
 
           <p className="text-end text-xs text-muted-foreground">
             تُحفظ الفاتورة كمسودة. الترحيل خطوة منفصلة تتطلب صلاحية الترحيل.
+            {draft.savedAt !== null ? (
+              <>
+                {' · '}
+                {draft.durable
+                  ? 'المسودة محفوظة على هذا الجهاز'
+                  : 'المسودة محفوظة في هذه النافذة فقط'}
+              </>
+            ) : null}
+            {!online ? <> · لا يوجد اتصال — سيُرسل عند العودة</> : null}
           </p>
         </CardBody>
       </Card>

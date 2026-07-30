@@ -52,7 +52,7 @@ each other's tables.
 ```
 
 `domain/` imports nothing from the outer layers. That is not architectural
-purity for its own sake: it is why 244 tests covering the whole of the system's
+purity for its own sake: it is why 269 tests covering the whole of the system's
 accounting behaviour run in under a second with no database.
 
 ### Bounded contexts
@@ -321,6 +321,11 @@ field holds for as long as it takes to type `"12.5"`. So `invoice-draft.ts` and
 running total — out rather than at zero, because those read differently: a line being
 typed contributes nothing, a line worth zero is one the calculator should refuse.
 
+**A draft is offered, never applied.** Form state auto-saves to IndexedDB, and on return
+the screen asks rather than filling itself in — silently restoring means someone who came
+to raise a new invoice starts editing an old one and learns of it from a customer name
+they did not type.
+
 **Saving is not posting.** Every entry screen creates a DRAFT. Posting is a separate
 action behind a separate permission, because it is what puts a document in the ledger,
 in the ZATCA hash chain and beyond editing — a save button that did that quietly would
@@ -401,9 +406,37 @@ Ordered by what a real deployment would need next:
    The approval workflow itself was schema-only until now; `approval-service.ts`
    drives it. Remaining screens: procurement, treasury, payroll, master-data
    maintenance and the rest of the reports.
-5. ZATCA onboarding: CSID acquisition, ECDSA signing (QR tags 7–9), clearance
-   and reporting API integration.
-6. PWA offline mode — IndexedDB draft persistence and background sync.
+5. ~~ZATCA onboarding: CSID acquisition, ECDSA signing (QR tags 7–9), clearance and
+   reporting API integration.~~ **Dropped from scope** by the project owner: this is a
+   reference implementation rather than a system that will invoice a real taxpayer, so
+   there is nothing to onboard and no Cryptographic Stamp Identifier to obtain.
+
+   What that changes and what it does not. The remaining work was always the part that
+   *cannot* be built without ZATCA issuing a CSID to a specific taxpayer — the ECDSA
+   signature and the clearance call. Dropping it drops exactly that. The envelope
+   already built stays: `zatca-service.ts` still produces the UUID, the UBL 2.1 XML, the
+   SHA-256 hash chained to its predecessor and the Base64 TLV QR payload, all of it
+   tested, and the seed still generates two hundred hash-chained e-invoices. Removing
+   working, tested code because the last mile is out of scope would trade a demonstrable
+   design for a smaller diff.
+
+   So the honest description of this system's ZATCA position is now: Phase 2 envelope,
+   deliberately unsigned, and not a certified integration. Anyone taking this toward a
+   real deployment picks the item back up here — the signing step was designed as an
+   addition rather than a rewrite, and that is still true.
+6. ~~PWA offline mode — IndexedDB draft persistence and background sync.~~ Done, and the
+   background-sync half needed a schema change to be safe rather than dangerous.
+
+   Replaying a submission whose response was never seen is the entire feature, and from
+   the client "never arrived" is indistinguishable from "arrived, and the reply was lost".
+   A queue without idempotency is therefore a mechanism for duplicating invoices that
+   fails hardest when the network is worst. So migration 006 records the first outcome of
+   each client-keyed mutation and returns it verbatim for repeats — and refuses a key
+   reused with a different body, because answering that with the first document's number
+   would be the quietest possible way to lose an invoice.
+
+   Scope is deliberately narrow: entry works offline, reading does not. The service worker
+   never serves an API response from a cache and never mediates a non-GET request.
 7. Bank reconciliation matching UI over the existing schema.
 8. Fixed-asset depreciation run and posting schedule.
 9. Partition maintenance job calling `erp_ensure_year_partition` ahead of time.

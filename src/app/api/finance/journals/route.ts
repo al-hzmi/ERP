@@ -232,5 +232,7 @@ export const POST = apiHandler(
   {
     rateLimit: 'mutation',
     permission: { resource: 'finance.journal', action: 'create' },
+    // Replayable by the offline queue, so it must not create two journals.
+    idempotent: true,
   },
 );

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="ERP">
+  <!-- A single scalable icon rather than a ladder of PNGs: every target platform in the
+       set that supports service workers also renders SVG icons, and a maskable SVG
+       cannot be produced at the wrong resolution. -->
+  <rect width="512" height="512" rx="96" fill="#0f1419"/>
+  <g fill="none" stroke="#ffffff" stroke-width="28" stroke-linecap="round">
+    <!-- A balance: the one thing this system is about. -->
+    <path d="M256 128v256"/>
+    <path d="M136 176h240"/>
+    <path d="M136 176 96 288h80z"/>
+    <path d="M376 176 336 288h80z"/>
+    <path d="M184 400h144"/>
+  </g>
+</svg>

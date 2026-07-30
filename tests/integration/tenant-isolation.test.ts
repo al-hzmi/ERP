@@ -60,6 +60,10 @@ const TENANT_SCOPED_TABLES = [
   'approval_policies',
   'approval_requests',
   'fixed_assets',
+  // Added by migration 006. It carries a `tenantId`, so it joins the policy set —
+  // unlike `rate_limit_counters`, which is consulted before authentication and
+  // therefore deliberately has no policy at all.
+  'request_idempotency',
 ] as const;
 
 interface PolicyRow {

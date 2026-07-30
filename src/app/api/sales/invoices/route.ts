@@ -310,5 +310,10 @@ export const POST = apiHandler(
       });
     });
   },
-  { permission: { resource: 'sales.invoice', action: 'create' }, rateLimit: 'mutation' },
+  {
+    permission: { resource: 'sales.invoice', action: 'create' },
+    rateLimit: 'mutation',
+    // Replayable by the offline queue, so it must not create two invoices.
+    idempotent: true,
+  },
 );

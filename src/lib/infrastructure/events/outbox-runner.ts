@@ -1,4 +1,5 @@
 import { eventBus, type OutboxDrainReport } from './event-bus';
+import { sweepIdempotencyRecords } from '@/lib/api/idempotency';
 import { logger } from '../logging/logger';
 import { sweepRateLimits } from '../security/rate-limit';
 
@@ -39,8 +40,17 @@ export interface OutboxRunnerOptions {
   readonly reclaimAfterSeconds?: number;
   /** How many ticks between reclaim sweeps. Recovery, not the hot path. */
   readonly reclaimEveryTicks?: number;
-  /** How many ticks between rate-limit counter sweeps. */
+  /** How many ticks between rate-limit and idempotency sweeps. */
   readonly sweepEveryTicks?: number;
+  /**
+   * How long an idempotency record is kept.
+   *
+   * It only has to outlive the window in which a client might retry under the same key.
+   * Too short and a replay after a long outage creates a duplicate; too long and the
+   * table grows by one row per mutation indefinitely. A day covers a laptop that was
+   * shut overnight, which is the case the offline queue exists for.
+   */
+  readonly idempotencyTtlSeconds?: number;
   /** Upper bound on the random delay added to each interval. */
   readonly jitterMs?: number;
 }
@@ -51,6 +61,7 @@ const DEFAULTS = {
   reclaimAfterSeconds: 300,
   reclaimEveryTicks: 12,
   sweepEveryTicks: 60,
+  idempotencyTtlSeconds: 86_400,
   jitterMs: 1_000,
 } as const;
 
@@ -76,6 +87,10 @@ export function outboxRunnerOptionsFromEnv(): Required<OutboxRunnerOptions> {
     sweepEveryTicks: positiveInt(
       process.env['OUTBOX_SWEEP_EVERY_TICKS'],
       DEFAULTS.sweepEveryTicks,
+    ),
+    idempotencyTtlSeconds: positiveInt(
+      process.env['IDEMPOTENCY_TTL_SECONDS'],
+      DEFAULTS.idempotencyTtlSeconds,
     ),
     jitterMs: positiveInt(process.env['OUTBOX_JITTER_MS'], DEFAULTS.jitterMs),
   };
@@ -167,6 +182,11 @@ export class OutboxRunner {
     if (this.ticks % this.options.sweepEveryTicks === 0) {
       const swept = await sweepRateLimits();
       if (swept > 0) logger.debug('Swept rate limit counters', { swept });
+
+      // Same argument: one row per keyed mutation, and no other scheduled process to
+      // discard them.
+      const keys = await sweepIdempotencyRecords(this.options.idempotencyTtlSeconds);
+      if (keys > 0) logger.debug('Swept idempotency records', { swept: keys });
     }
 
     const report = await eventBus.drainOutbox(this.options.batchSize);
