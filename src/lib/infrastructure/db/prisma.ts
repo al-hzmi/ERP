@@ -282,6 +282,18 @@ function warnIfUnscoped(operation: string, tenantId: string | undefined): void {
   }
 }
 
+/**
+ * Closes the pool.
+ *
+ * A request-serving process never calls this — the pool outlives every request by
+ * design. A background worker does: on SIGTERM it has to release its connections
+ * before exiting, or the platform's grace period elapses and the process is killed
+ * with a claim it has not settled.
+ */
+export async function disconnectPrisma(): Promise<void> {
+  await base.$disconnect();
+}
+
 /** PostgreSQL 40001 (serialisation failure) and 40P01 (deadlock) are transient. */
 function isRetryableTransactionError(error: unknown): boolean {
   if (error instanceof Prisma.PrismaClientKnownRequestError) {

@@ -21,6 +21,7 @@
     "db:migrate:dev": "prisma migrate dev",
     "db:push": "prisma db push",
     "db:seed": "tsx prisma/seed.ts",
+    "outbox:worker": "tsx scripts/outbox-worker.ts",
     "db:reset": "prisma migrate reset --force"
   },
   "prisma": {

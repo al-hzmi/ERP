@@ -275,6 +275,13 @@ model OutboxEvent {
   lastError     String?
   /// Events that exhausted their retries land here for operator review.
   deadLettered  Boolean   @default(false)
+  /// Set when a dispatcher takes the row, cleared when it finishes. A claim that
+  /// outlives its transaction is what lets dispatch happen outside one — handlers
+  /// do I/O, and a transaction held open across a network call holds a connection.
+  claimedAt     DateTime? @db.Timestamptz(6)
+  /// Which worker holds the claim. Diagnostic: when a batch is stuck, the first
+  /// question is which instance to look at.
+  claimedBy     String?   @db.VarChar(128)
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
@@ -282,6 +289,27 @@ model OutboxEvent {
   @@index([tenantId, aggregateType, aggregateId])
   @@index([eventType])
   @@map("outbox_events")
+}
+
+/// Sliding-window request counters, shared by every application instance.
+///
+/// Not tenant-scoped, and deliberately outside the row-level security policies:
+/// the limiter refuses traffic before authentication, at a point in the request
+/// where no tenant is bound. A key is a scope plus an IP or a user id.
+///
+/// The application never reads or writes this table directly — the arithmetic has
+/// to be atomic per key, so it lives in `erp_rate_limit_hit()`.
+model RateLimitCounter {
+  key         String   @id @db.VarChar(256)
+  windowStart DateTime @db.Timestamptz(6)
+  hits        Int      @default(0)
+  /// Hits in the preceding window, counted in proportion to how much of it still
+  /// falls inside the trailing window. This is what makes the window slide.
+  prevHits    Int      @default(0)
+  updatedAt   DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([updatedAt])
+  @@map("rate_limit_counters")
 }
 
 /// Gap-free-by-design sequential numbering. A drafted-then-deleted document keeps

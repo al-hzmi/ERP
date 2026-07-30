@@ -65,7 +65,7 @@ export async function POST(request: Request): Promise<NextResponse> {
   const { username, password, tenantCode } = parsed.data;
 
   const rateKey = `${username.toLowerCase()}|${ipAddress ?? 'unknown'}`;
-  const limit = checkRateLimit('auth', rateKey);
+  const limit = await checkRateLimit('auth', rateKey);
   if (!limit.allowed) {
     return json(DomainErrors.rateLimited(limit.retryAfterSeconds), 429, {
       'Retry-After': String(limit.retryAfterSeconds),
@@ -182,7 +182,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     );
   });
 
-  resetRateLimit('auth', rateKey);
+  await resetRateLimit('auth', rateKey);
 
   const response = NextResponse.json({
     success: true,
