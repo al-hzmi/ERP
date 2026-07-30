@@ -5,6 +5,7 @@ import { usePathname } from 'next/navigation';
 import {
   ArrowLeftRight,
   Banknote,
+  Building2,
   BookPlus,
   Landmark,
   Boxes,
@@ -93,6 +94,7 @@ const NAVIGATION: readonly NavSection[] = [
       { href: '/finance/trial-balance', labelAr: 'ميزان المراجعة', labelEn: 'Trial Balance', icon: Scale },
       { href: '/treasury/payments', labelAr: 'سندات القبض والصرف', labelEn: 'Payment Vouchers', icon: Banknote },
       { href: '/treasury/reconciliation', labelAr: 'التسوية البنكية', labelEn: 'Bank Reconciliation', icon: Landmark },
+      { href: '/finance/depreciation', labelAr: 'إهلاك الأصول الثابتة', labelEn: 'Fixed Asset Depreciation', icon: Building2 },
     ],
   },
   {

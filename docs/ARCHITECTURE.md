@@ -52,7 +52,7 @@ each other's tables.
 ```
 
 `domain/` imports nothing from the outer layers. That is not architectural
-purity for its own sake: it is why 299 tests covering the whole of the system's
+purity for its own sake: it is why 331 tests covering the whole of the system's
 accounting behaviour run in under a second with no database.
 
 ### Bounded contexts
@@ -456,7 +456,57 @@ Ordered by what a real deployment would need next:
    Migration 007 adds the constraints these tables never had, including the partial unique
    index that stops one payment being reconciled twice — which would make the balances
    appear to agree while concealing a genuine unexplained difference.
-8. Fixed-asset depreciation run and posting schedule.
+8. ~~Fixed-asset depreciation run and posting schedule.~~ Done, and the largest thing it
+   found had nothing to do with depreciation.
+
+   `depreciation_schedules` had **no row-level security policy at all**. Migration 4
+   protects every table carrying a `tenantId`; this one was reachable only through its
+   asset, so it carried none and the sweep passed it over — leaving it readable and
+   writable across every tenant in the cluster under `erp_app`. Migration 008
+   denormalises the tenant onto the row so the standard fail-closed policy applies, with a
+   trigger refusing any row whose tenant disagrees with its asset's, so the
+   denormalisation cannot become a second source of truth. Six sibling tables are in the
+   same position and deliberately left alone — that is a security migration in its own
+   right, not a footnote to a feature, and it is recorded under known limitations.
+
+   The arithmetic is isolated in `domain/assets/depreciation.ts` because two properties
+   have to hold *exactly* and both are easy to lose: the schedule totals `cost − salvage`
+   to the halala, and net book value never drops below salvage. `Money.split` gives the
+   first for straight line. Declining balance switches to straight line once straight line
+   charges more — without the switch a declining balance approaches salvage
+   asymptotically and never arrives — and the switch allocates the whole remaining tail in
+   one `split` rather than recomputing `remaining ÷ months left` each month. Those look
+   equivalent and are not: each division rounds, the rounding feeds the next month's base,
+   and a schedule that is flat by construction comes out jittering by fractions of a
+   halala. That jitter is what the unit tests caught.
+
+   Generating a schedule and running a period are separate operations, which is what makes
+   the register auditable: the schedule is reviewable *before* anything reaches the ledger,
+   and the run has no arithmetic of its own to get wrong — it posts figures computed and
+   stored earlier. A design that computed the charge at posting time would answer
+   differently if the asset's terms were edited mid-life, with nothing recording that they
+   had been.
+
+   One journal per run, compacted by account, `Dr depreciation expense / Cr accumulated
+   depreciation`. The asset's cost is never touched: accumulated depreciation is a
+   contra-asset (migration 3 made that expressible), and writing the cost down directly
+   would destroy the one figure a fixed asset register exists to preserve. Line
+   descriptions are deliberately *not* stamped with the asset number, because `compact()`
+   groups by account and description together — a per-asset note would put one line per
+   asset per month in the ledger and make the trial balance unreadable. The asset-level
+   detail is not lost: every schedule row carries the journal's id.
+
+   The run refuses three things. It will not touch a disposed asset. It will not post
+   twice — the flip to `isPosted` shares the `SERIALIZABLE` transaction with the journal,
+   so a concurrent second run fails on the write conflict, retries, and finds nothing due.
+   And it skips any asset whose schedule is posted **out of order**, because the register's
+   `accumulatedDepreciation` is read from the last posted period's cumulative column, which
+   is only the true total when every period before it is posted. The first version of that
+   check compared the earliest unposted period against the earliest *due* one, which is a
+   tautology — due periods are a prefix of unposted ones — and could never fire. An
+   integration test that reopened a period after later ones were charged is what exposed
+   it. It now looks for a posted period later than an unposted one, which is the actual
+   invariant.
 9. Partition maintenance job calling `erp_ensure_year_partition` ahead of time.
    Deliberately last: migration 2 pre-creates yearly partitions through 2032 and
    every parent has a DEFAULT partition, so an out-of-range insert is slower rather
