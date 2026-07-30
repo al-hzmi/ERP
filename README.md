@@ -209,6 +209,13 @@ only the application change that put every read path inside a tenant scope. See
 | **Journal register** | `/finance/journals` | The general ledger, filterable by status; `type` shows what posted each entry |
 | **Voucher register** | `/treasury/payments` | Receipts and payments together, with the unallocated balance in its own column |
 | **Voucher entry** | `/treasury/payments/new` | Allocation grid over open documents, oldest due first, with the unallocated figure computed in `Money` |
+| **Products** | `/inventory/products` | Catalogue with search and category filter; `costPrice` withheld without the field grant |
+| **Product card** | `/inventory/products/[id]` | Terms, stock per warehouse (never one number), and the last twenty movements |
+| **Stock balances** | `/inventory/stock` | By warehouse, valued from `totalValue`, with totals aggregated over the whole filtered set |
+| **Customers** | `/sales/customers` | Register with balance and credit standing |
+| **Customer card** | `/sales/customers/[id]` | Five-bucket ageing by days past due, open documents, recent vouchers |
+| **Suppliers** | `/procurement/suppliers` | The same table read the other way; `BOTH` appears in both registers |
+| **Supplier card** | `/procurement/suppliers/[id]` | Payable ageing and open exposure |
 | Sign-in | `/login` | |
 
 The sidebar is an accordion of five modules, each split into **التهيئة / العمليات / التقارير**
@@ -383,15 +390,20 @@ Stated plainly rather than discovered later:
   sales, procurement, inventory, treasury, financials and HR. The UI ships the
   dashboard, the sales register and invoice entry, the journal entry screen, the trial
   balance, the approval inbox, the stock card, bank reconciliation, the depreciation
-  run, the journal and voucher registers, voucher entry and sign-in. Procurement,
-  payroll and the master-data maintenance screens are still API-only, and appear in the
-  sidebar as *قريباً* rather than as links.
-- **Detail pages do not exist yet, and nothing pretends they do.** There is no invoice,
-  customer, supplier, account or employee detail screen. Until this commit the sales
-  register linked to `/sales/invoices/{id}` and global search pointed at six such routes —
-  all of them 404s reachable from a single click or an Enter key. The registers now render
-  those identifiers as plain text, and a search hit with no screen behind it renders as a
-  row rather than a link, labelled *لا توجد شاشة*. Less convenient and honest.
+  run, the journal and voucher registers, voucher entry, the product catalogue and card,
+  stock balances, the customer and supplier registers and cards, and sign-in. Purchase
+  documents, payroll, GRC and the remaining master-data maintenance screens are still
+  API-only and appear in the sidebar as *قريباً* rather than as links.
+- **Some detail pages still do not exist, and nothing pretends they do.** Product,
+  customer and supplier cards now exist and global search links to them again. Invoice,
+  account and employee detail screens do not: those identifiers render as plain text and a
+  search hit with no screen behind it renders as a row labelled *لا توجد شاشة* rather than
+  a link. Less convenient and honest.
+- **Reorder points are per product, not per warehouse.** `/inventory/stock` flags a row
+  whose balance is at or below the product's `reorderPoint`, which over-reports in a
+  multi-warehouse company — the figure is company-wide and the balance is not. It is shown
+  as a hint, never as a purchasing instruction. A real replenishment feature needs a
+  per-warehouse reorder point, which is a schema change and not one made speculatively.
 - **Offline mode covers data entry, not the whole application.** Drafts auto-save to
   IndexedDB and queued submissions replay under an idempotency key, so the two entry
   screens work with no connection. Everything that *reads* — the dashboard, the

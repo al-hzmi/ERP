@@ -21,8 +21,22 @@ import { withTenantRead } from '@/lib/infrastructure/db/prisma';
  * invoice, which balances arithmetically and is nonsense.
  */
 
-const RECEIVABLE_TYPES = ['SALES_INVOICE', 'DEBIT_NOTE'] as const;
-const PAYABLE_TYPES = ['PURCHASE_INVOICE', 'CREDIT_NOTE'] as const;
+/**
+ * What each voucher direction settles.
+ *
+ * Invoices only. The two note types — `SALES_CREDIT_NOTE` and `PURCHASE_DEBIT_NOTE` — reduce a
+ * balance rather than create one, so they are not settled *by* a payment; applying a receipt
+ * to a credit note would be settling a debt that runs the other way. Netting a note against an
+ * invoice is a separate operation with its own accounting, and offering it here disguised as
+ * an allocation would produce entries nobody could explain.
+ *
+ * An earlier version of this listed `DEBIT_NOTE` and `CREDIT_NOTE`, which are not values of
+ * `DocumentType` at all. The comparison is on `::text`, so those never matched anything and
+ * never errored — the wrong kind of bug: silent, and invisible until someone wondered why a
+ * note never appeared.
+ */
+const RECEIVABLE_TYPES = ['SALES_INVOICE'] as const;
+const PAYABLE_TYPES = ['PURCHASE_INVOICE'] as const;
 
 export const GET = apiHandler(
   async (context, request) => {

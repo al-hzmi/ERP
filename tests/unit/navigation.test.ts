@@ -61,7 +61,11 @@ describe('the navigation tree', () => {
       '/finance/journals',
       '/finance/journals/new',
       '/finance/trial-balance',
+      '/inventory/products',
+      '/inventory/stock',
       '/inventory/stock-card',
+      '/procurement/suppliers',
+      '/sales/customers',
       '/sales/invoices',
       '/sales/invoices/new',
       '/treasury/payments',
@@ -159,7 +163,9 @@ describe('every link the application can emit', () => {
    * purpose — if the two drift, this is where it surfaces.
    */
   const SEARCH_DESTINATIONS = [
-    { prefix: '/inventory/stock-card', page: 'inventory/stock-card' },
+    { prefix: '/inventory/products', page: 'inventory/products/[id]' },
+    { prefix: '/sales/customers', page: 'sales/customers/[id]' },
+    { prefix: '/procurement/suppliers', page: 'procurement/suppliers/[id]' },
     { prefix: '/sales/invoices', page: 'sales/invoices' },
   ];
 
@@ -183,14 +189,9 @@ describe('every link the application can emit', () => {
     );
 
     // The route families that used to be emitted and no longer exist anywhere.
-    for (const dead of [
-      '/sales/customers/',
-      '/procurement/suppliers/',
-      '/finance/accounts/',
-      '/hr/employees/',
-      '/inventory/products/',
-      '/procurement/invoices/',
-    ]) {
+    // Still unbuilt. `/sales/customers/`, `/procurement/suppliers/` and `/inventory/products/`
+    // left this list when their detail pages shipped.
+    for (const dead of ['/finance/accounts/', '/hr/employees/', '/procurement/invoices/']) {
       expect(source, `search-service still emits ${dead}`).not.toContain(`\`${dead}`);
     }
   });

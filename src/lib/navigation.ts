@@ -200,7 +200,7 @@ export const NAVIGATION: readonly NavModule[] = [
       {
         kind: 'setup',
         items: [
-          { labelAr: 'الأصناف', labelEn: 'Products', icon: Package },
+          { href: '/inventory/products', labelAr: 'الأصناف', labelEn: 'Products', icon: Package },
           { labelAr: 'التصنيفات والماركات', labelEn: 'Categories & Brands', icon: Folders },
           { labelAr: 'وحدات القياس', labelEn: 'Units of Measure', icon: Boxes },
           { labelAr: 'المستودعات', labelEn: 'Warehouses', icon: Warehouse },
@@ -224,7 +224,7 @@ export const NAVIGATION: readonly NavModule[] = [
       {
         kind: 'reports',
         items: [
-          { labelAr: 'أرصدة المخزون', labelEn: 'Stock Balances', icon: Warehouse },
+          { href: '/inventory/stock', labelAr: 'أرصدة المخزون', labelEn: 'Stock Balances', icon: Warehouse },
           { labelAr: 'تقييم المخزون', labelEn: 'Inventory Valuation', icon: Coins },
           { labelAr: 'حركة الأصناف', labelEn: 'Movement Analysis', icon: Activity },
           { labelAr: 'الأصناف الراكدة', labelEn: 'Slow-Moving Stock', icon: PackageSearch },
@@ -241,8 +241,8 @@ export const NAVIGATION: readonly NavModule[] = [
       {
         kind: 'setup',
         items: [
-          { labelAr: 'العملاء', labelEn: 'Customers', icon: Users },
-          { labelAr: 'الموردون', labelEn: 'Suppliers', icon: Truck },
+          { href: '/sales/customers', labelAr: 'العملاء', labelEn: 'Customers', icon: Users },
+          { href: '/procurement/suppliers', labelAr: 'الموردون', labelEn: 'Suppliers', icon: Truck },
           { labelAr: 'قوائم الأسعار', labelEn: 'Price Lists', icon: FileSpreadsheet },
           { labelAr: 'شروط الدفع', labelEn: 'Payment Terms', icon: CalendarClock },
         ],

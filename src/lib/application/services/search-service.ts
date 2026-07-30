@@ -179,9 +179,7 @@ async function searchProducts(
     titleEn: row.nameEn,
     subtitle: `${row.salePrice} SAR`,
     score: row.score,
-    // No product detail page yet. The stock card is the closest built screen and takes a
-    // product, so a hit lands there rather than nowhere.
-    href: `/inventory/stock-card?productId=${row.id}`,
+    href: `/inventory/products/${row.id}`,
   }));
 }
 
@@ -243,9 +241,12 @@ async function searchCounterparties(
     titleEn: row.nameEn,
     subtitle: row.phone,
     score: row.score,
-    // Neither the customer nor the supplier screen exists. Returned without a destination
-    // rather than pointed at a 404.
-    href: null,
+    // `BOTH` is a customer as much as a supplier; the customer card is the one that shows
+    // receivable ageing, which is what someone searching a trading partner usually wants.
+    href:
+      row.type === 'SUPPLIER'
+        ? `/procurement/suppliers/${row.id}`
+        : `/sales/customers/${row.id}`,
   }));
 }
 

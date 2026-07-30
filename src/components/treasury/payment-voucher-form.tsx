@@ -79,8 +79,6 @@ const METHODS = [
 const DOCUMENT_TYPE_LABELS: Record<string, string> = {
   SALES_INVOICE: 'فاتورة مبيعات',
   PURCHASE_INVOICE: 'فاتورة مشتريات',
-  DEBIT_NOTE: 'إشعار مدين',
-  CREDIT_NOTE: 'إشعار دائن',
 };
 
 function today(): string {
