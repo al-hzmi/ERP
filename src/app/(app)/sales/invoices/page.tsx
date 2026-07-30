@@ -3,7 +3,7 @@ import { Plus } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardHeader } from '@/components/ui/card';
-import { getRequestContext } from '@/lib/infrastructure/auth/request-context';
+import { withPageScope } from '@/lib/api/page';
 import { prisma } from '@/lib/infrastructure/db/prisma';
 import { formatDate, formatMoney, statusLabel } from '@/lib/utils/format';
 
@@ -26,55 +26,60 @@ export default async function SalesInvoicesPage({
 }: {
   searchParams: { page?: string; status?: string; q?: string };
 }): Promise<JSX.Element> {
-  const context = await getRequestContext();
-  if (!context.ok) return <p>غير مصرح.</p>;
-
   const page = Math.max(1, Number.parseInt(searchParams.page ?? '1', 10) || 1);
   const status = searchParams.status;
   const query = searchParams.q?.trim();
 
-  const where = {
-    tenantId: context.value.tenantId,
-    type: 'SALES_INVOICE' as const,
-    ...(status !== undefined && status !== 'ALL' ? { status: status as never } : {}),
-    ...(query !== undefined && query !== ''
-      ? {
-          OR: [
-            { documentNumber: { contains: query, mode: 'insensitive' as const } },
-            { counterparty: { nameAr: { contains: query, mode: 'insensitive' as const } } },
-          ],
-        }
-      : {}),
-  };
+  const { invoices, total, tenant, canCreate } = await withPageScope(async (context) => {
+    const where = {
+      tenantId: context.tenantId,
+      type: 'SALES_INVOICE' as const,
+      ...(status !== undefined && status !== 'ALL' ? { status: status as never } : {}),
+      ...(query !== undefined && query !== ''
+        ? {
+            OR: [
+              { documentNumber: { contains: query, mode: 'insensitive' as const } },
+              { counterparty: { nameAr: { contains: query, mode: 'insensitive' as const } } },
+            ],
+          }
+        : {}),
+    };
 
-  const [invoices, total, tenant] = await Promise.all([
-    prisma.document.findMany({
-      where,
-      select: {
-        id: true,
-        documentNumber: true,
-        status: true,
-        issueDate: true,
-        dueDate: true,
-        currency: true,
-        total: true,
-        paidAmount: true,
-        counterparty: { select: { code: true, nameAr: true } },
-        branch: { select: { nameAr: true } },
-      },
-      orderBy: [{ issueDate: 'desc' }, { documentNumber: 'desc' }],
-      skip: (page - 1) * PAGE_SIZE,
-      take: PAGE_SIZE,
-    }),
-    prisma.document.count({ where }),
-    prisma.tenant.findUniqueOrThrow({
-      where: { id: context.value.tenantId },
-      select: { functionalCurrency: true },
-    }),
-  ]);
+    const [loadedInvoices, loadedTotal, loadedTenant] = await Promise.all([
+      prisma.document.findMany({
+        where,
+        select: {
+          id: true,
+          documentNumber: true,
+          status: true,
+          issueDate: true,
+          dueDate: true,
+          currency: true,
+          total: true,
+          paidAmount: true,
+          counterparty: { select: { code: true, nameAr: true } },
+          branch: { select: { nameAr: true } },
+        },
+        orderBy: [{ issueDate: 'desc' }, { documentNumber: 'desc' }],
+        skip: (page - 1) * PAGE_SIZE,
+        take: PAGE_SIZE,
+      }),
+      prisma.document.count({ where }),
+      prisma.tenant.findUniqueOrThrow({
+        where: { id: context.tenantId },
+        select: { functionalCurrency: true },
+      }),
+    ]);
+
+    return {
+      invoices: loadedInvoices,
+      total: loadedTotal,
+      tenant: loadedTenant,
+      canCreate: context.permissions.can('sales.invoice', 'create'),
+    };
+  });
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const canCreate = context.value.permissions.can('sales.invoice', 'create');
 
   const STATUS_FILTERS = [
     { value: 'ALL', label: 'الكل' },

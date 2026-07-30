@@ -1,8 +1,7 @@
-import { redirect } from 'next/navigation';
 import type { ReactNode } from 'react';
 import { AppShell } from '@/components/layout/app-shell';
 import { QueryProvider } from '@/components/providers/query-provider';
-import { getRequestContext } from '@/lib/infrastructure/auth/request-context';
+import { withPageScope } from '@/lib/api/page';
 import { prisma } from '@/lib/infrastructure/db/prisma';
 
 /**
@@ -12,22 +11,23 @@ import { prisma } from '@/lib/infrastructure/db/prisma';
  * segment renders. Guarding in a client component would ship the page to the
  * browser first and redirect afterwards — which briefly hands unauthenticated
  * markup to whoever asked for it.
+ *
+ * `withPageScope` does the redirect and binds the tenant to the database session.
+ * `users` is under a fail-closed policy, so without the binding the lookup below
+ * returns `null` and the shell renders with no name and no company — an empty
+ * header rather than an error.
  */
 export default async function AppLayout({ children }: { children: ReactNode }): Promise<JSX.Element> {
-  const context = await getRequestContext();
-
-  if (!context.ok) {
-    redirect('/login');
-  }
-
-  const user = await prisma.user.findUnique({
-    where: { id: context.value.userId },
-    select: {
-      fullNameAr: true,
-      fullNameEn: true,
-      tenant: { select: { nameAr: true } },
-    },
-  });
+  const user = await withPageScope(async (context) =>
+    prisma.user.findUnique({
+      where: { id: context.userId },
+      select: {
+        fullNameAr: true,
+        fullNameEn: true,
+        tenant: { select: { nameAr: true } },
+      },
+    }),
+  );
 
   return (
     <QueryProvider>

@@ -1,7 +1,7 @@
 import { AlertTriangle, CheckCircle2 } from 'lucide-react';
 import { Card, CardHeader } from '@/components/ui/card';
 import { getTrialBalance } from '@/lib/application/services/report-service';
-import { getRequestContext } from '@/lib/infrastructure/auth/request-context';
+import { withPageScope } from '@/lib/api/page';
 import { prisma } from '@/lib/infrastructure/db/prisma';
 import { formatMoney } from '@/lib/utils/format';
 
@@ -29,11 +29,37 @@ export default async function TrialBalancePage({
 }: {
   searchParams: { from?: string; to?: string };
 }): Promise<JSX.Element> {
-  const context = await getRequestContext();
-  if (!context.ok) return <p>غير مصرح.</p>;
+  const year = new Date().getUTCFullYear();
+  const from = searchParams.from ?? `${year}-01-01`;
+  const to = searchParams.to ?? `${year}-12-31`;
 
-  const permitted = context.value.permissions.can('finance.report', 'read');
-  if (!permitted) {
+  const loaded = await withPageScope(async (context) => {
+    // Checked before the report runs: refusing after computing it would do all the
+    // work and then throw it away.
+    if (!context.permissions.can('finance.report', 'read')) {
+      return { permitted: false } as const;
+    }
+
+    const tenant = await prisma.tenant.findUniqueOrThrow({
+      where: { id: context.tenantId },
+      select: { functionalCurrency: true, nameAr: true },
+    });
+
+    return {
+      permitted: true,
+      tenant,
+      // Reads `journal_lines`, which is both partitioned and tenant-scoped, so it
+      // needs the binding this callback runs inside.
+      report: await getTrialBalance({
+        tenantId: context.tenantId,
+        fromDate: new Date(from),
+        toDate: new Date(to),
+        currency: tenant.functionalCurrency,
+      }),
+    } as const;
+  });
+
+  if (!loaded.permitted) {
     return (
       <Card className="p-8 text-center">
         <p className="text-sm text-destructive">ليس لديك صلاحية الاطلاع على التقارير المالية.</p>
@@ -41,22 +67,7 @@ export default async function TrialBalancePage({
     );
   }
 
-  const year = new Date().getUTCFullYear();
-  const from = searchParams.from ?? `${year}-01-01`;
-  const to = searchParams.to ?? `${year}-12-31`;
-
-  const tenant = await prisma.tenant.findUniqueOrThrow({
-    where: { id: context.value.tenantId },
-    select: { functionalCurrency: true, nameAr: true },
-  });
-
-  const report = await getTrialBalance({
-    tenantId: context.value.tenantId,
-    fromDate: new Date(from),
-    toDate: new Date(to),
-    currency: tenant.functionalCurrency,
-  });
-
+  const { tenant, report } = loaded;
   const currency = tenant.functionalCurrency;
 
   return (

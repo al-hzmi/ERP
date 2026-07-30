@@ -38,16 +38,17 @@ meaningfully: `sales` can raise an invoice but not post it, `auditor` can read
 everything and change nothing.
 
 ```bash
-npm test           # 255 tests (190 unit + 65 integration)
+npm test           # 278 tests (202 unit + 76 integration)
 npm run typecheck  # strict TypeScript, no `any`, no `@ts-ignore`
 npm run build      # production build
 ```
 
-The integration tests need `DATABASE_URL` pointing at a migrated database. The two
-added in migration 005's commit skip themselves without one; `database-guards` and
-`tenant-isolation` predate that convention and fail instead, so `npm test` is red
-on a machine with no PostgreSQL. Run `npm run test:unit` there, or point
-`DATABASE_URL` at a scratch database and run the lot.
+The integration tests need `DATABASE_URL` pointing at a migrated database, and
+`tenant-isolation-as-app-role` additionally needs `APP_DATABASE_URL` for the
+non-owner role. Those three skip themselves when their variable is unset;
+`database-guards` and `tenant-isolation` predate that convention and fail instead,
+so `npm test` is red on a machine with no PostgreSQL. Run `npm run test:unit`
+there, or point both variables at a scratch database and run the lot.
 
 ---
 
@@ -102,17 +103,17 @@ src/
 │   │   └── sales/            invoice calculator
 │   ├── application/          use cases and services — orchestration only
 │   ├── infrastructure/       Prisma, auth, audit, crypto, events, logging
-│   ├── api/                  the shared route handler
+│   ├── api/                  the shared route handler and page scope
 │   └── utils/                formatting (Arabic numerals, Hijri, BiDi)
 ├── store/                    Zustand — client UI state only
 └── styles/
 prisma/
 ├── schema.prisma             7 bounded contexts
-├── migrations/               3 migrations (see below)
+├── migrations/               5 migrations (see below)
 └── seed.ts + seed/           the data generator
 tests/
-├── unit/                     164 tests, no database required
-└── integration/              29 tests against real PostgreSQL
+├── unit/                     202 tests, no database required
+└── integration/              76 tests against real PostgreSQL
 ```
 
 Dependencies point inward. `domain/` imports nothing from `application/` or
@@ -137,6 +138,10 @@ testable without a database.
 5. **`20260730000000_outbox_runner_and_shared_rate_limits`** — claim columns on
    `outbox_events`, so a claim can outlive the transaction that took it; and the
    shared rate-limit counters with their sliding-window function.
+
+Migration 4 installed the policies; making them *apply* took no further migration,
+only the application change that put every read path inside a tenant scope. See
+`.env.example` for the role switch that activates them.
 
 > Migration 2 adds two generated `tsvector` columns that are deliberately absent
 > from `schema.prisma` (Prisma cannot express `GENERATED ALWAYS AS ... STORED`).
@@ -229,8 +234,17 @@ rewrite.
   raw SQL. No string-concatenated SQL exists in the codebase.
 - **Errors** — a stack trace never reaches a response body. Failures return a
   stable bilingual envelope and a correlation reference.
-- **Multi-tenancy** — RLS policies are installed and enabled; pointing the app at
-  a non-owner database role is a deployment change, not a migration.
+- **Multi-tenancy** — RLS policies are installed, fail closed, and now actually
+  apply: every read path runs inside a tenant scope, so `DATABASE_URL` can point at
+  the non-owner `erp_web` role. Until that switch the policies were inert, because
+  PostgreSQL exempts a table's owner from its own policies — the control existed and
+  did nothing. `tenant-isolation-as-app-role.test.ts` asserts on rows from a role the
+  policies apply to, which is the only way to demonstrate the difference.
+- **A forgotten scope is loud** — the client extension warns, in development, when a
+  model carrying `tenantId` is queried with nothing bound. The models are derived
+  from the schema rather than listed, so adding one cannot quietly escape the check.
+  This matters because the failure mode is silence: an unscoped read under `erp_app`
+  returns no rows, so a page renders an empty table instead of an error.
 
 ---
 

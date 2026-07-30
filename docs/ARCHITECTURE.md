@@ -52,7 +52,7 @@ each other's tables.
 ```
 
 `domain/` imports nothing from the outer layers. That is not architectural
-purity for its own sake: it is why 164 tests covering the whole of the system's
+purity for its own sake: it is why 202 tests covering the whole of the system's
 accounting behaviour run in under a second with no database.
 
 ### Bounded contexts
@@ -144,9 +144,19 @@ would pass just as happily if every trigger had been dropped.
 - **Search.** `pg_trgm` GIN indexes plus generated `tsvector` columns. The
   trigram index is what lets `ILIKE '%1001%'` find `BTC-1001` without the
   sequential scan a leading wildcard would normally force.
-- **RLS.** Tenant-isolation policies are installed and enabled, permissive while
-  `erp.tenant_id` is unset. Pointing the app at a non-owner role is a deployment
-  change, not a migration.
+- **RLS.** Tenant-isolation policies are installed, enabled and fail closed: with
+  `erp.tenant_id` unset a session under `erp_app` sees no rows at all. Every read
+  path now runs inside a tenant scope, so the application can connect as the
+  non-owner role — which is the step that makes the policies do anything, since
+  PostgreSQL exempts a table's owner from its own.
+
+  The mechanism is `AsyncLocalStorage` rather than a threaded parameter: a parameter
+  that must be passed everywhere is one that is eventually forgotten somewhere. The
+  request wrapper (`apiHandler`) and the server-component wrapper (`withPageScope`)
+  open the scope; the Prisma client extension binds it to the transaction. In
+  development the extension also warns when a model carrying `tenantId` is queried
+  with nothing bound, because the failure mode is an empty result rather than an
+  error — the one kind of bug that reaches production looking like a quiet day.
 
 ---
 
@@ -252,9 +262,9 @@ the slowest subscriber takes.
 
 Draining is per tenant rather than one pass over the table, because `outbox_events`
 is under a fail-closed RLS policy: a session with no tenant bound sees nothing. The
-tenant predicate is also written explicitly in the claim, because PostgreSQL exempts
-a table's owner from its own policies and the application still connects as the
-owner — so the predicate is the control and the policy is the backstop.
+tenant predicate is also written explicitly in the claim, because the seed generator
+and back-office tooling still run as the owner, which PostgreSQL exempts from its own
+policies — so the predicate is the control and the policy is the backstop.
 
 Handlers are isolated; one failing does not prevent the others. Five failed attempts
 dead-letters the event for a human rather than retrying forever against a bug. A
@@ -351,11 +361,19 @@ Ordered by what a real deployment would need next:
    dependency to a stack that has none, for a table that sees one small upsert per
    request — and `RateLimitStore` is a two-method interface, so a Redis
    implementation remains a drop-in if the write volume ever justifies one.
-3. Complete the UI: invoice entry form, journal entry screen, approval inbox,
+3. ~~Put every read path inside a tenant scope so the application can connect as
+   `erp_app`.~~ Done — `withPageScope` for server components, tenant resolution
+   before the user lookup in sign-in, and a development-time warning when a
+   tenant-scoped model is queried unbound. Verified from a non-owner role rather
+   than from the catalogue.
+4. Complete the UI: invoice entry form, journal entry screen, approval inbox,
    stock card, remaining reports.
-4. ZATCA onboarding: CSID acquisition, ECDSA signing (QR tags 7–9), clearance
+5. ZATCA onboarding: CSID acquisition, ECDSA signing (QR tags 7–9), clearance
    and reporting API integration.
-5. PWA offline mode — IndexedDB draft persistence and background sync.
-6. Bank reconciliation matching UI over the existing schema.
-7. Fixed-asset depreciation run and posting schedule.
-8. Partition maintenance job calling `erp_ensure_year_partition` ahead of time.
+6. PWA offline mode — IndexedDB draft persistence and background sync.
+7. Bank reconciliation matching UI over the existing schema.
+8. Fixed-asset depreciation run and posting schedule.
+9. Partition maintenance job calling `erp_ensure_year_partition` ahead of time.
+   Deliberately last: migration 2 pre-creates yearly partitions through 2032 and
+   every parent has a DEFAULT partition, so an out-of-range insert is slower rather
+   than rejected. This is an optimisation with a 2032 deadline, not a latent outage.

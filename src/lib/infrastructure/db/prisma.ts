@@ -70,10 +70,11 @@ function createBaseClient(): PrismaClient {
 function createExtendedClient(base: PrismaClient) {
   return base.$extends({
     query: {
-      async $allOperations({ args, query }) {
+      async $allOperations({ args, query, model, operation }) {
         const tenantId = currentTenantId();
 
         if (tenantId === undefined) {
+          warnIfScopedModelIsUnbound(model, operation);
           return query(args);
         }
 
@@ -89,6 +90,45 @@ function createExtendedClient(base: PrismaClient) {
       },
     },
   });
+}
+
+/**
+ * The models a tenant policy applies to, derived rather than listed.
+ *
+ * A hand-maintained list would drift the first time a model was added, and it would
+ * drift silently — the symptom of a missing entry is a query that quietly returns
+ * nothing, not one that fails. Every tenant-scoped table carries a `tenantId`
+ * column, so the schema already knows the answer.
+ */
+const TENANT_SCOPED_MODELS: ReadonlySet<string> = new Set(
+  Prisma.dmmf.datamodel.models
+    .filter((model) => model.fields.some((field) => field.name === 'tenantId'))
+    .map((model) => model.name),
+);
+
+/**
+ * Complains, in development, when a tenant-scoped model is queried with nothing
+ * bound.
+ *
+ * This is the counterpart to the failure mode the row-level security migration
+ * describes: under `erp_app` an unscoped read returns no rows rather than raising,
+ * so a page that forgets its scope renders an empty table and looks like a company
+ * with no invoices. A log line at the moment it happens is the difference between
+ * finding that in development and finding it in production.
+ *
+ * Raw queries carry no model name, so they cannot be checked here. The reports and
+ * the search are written in `$queryRaw` and are covered by their own tests instead.
+ */
+function warnIfScopedModelIsUnbound(model: string | undefined, operation: string): void {
+  if (process.env.NODE_ENV === 'production') return;
+  if (model === undefined || !TENANT_SCOPED_MODELS.has(model)) return;
+
+  console.warn(
+    `[prisma] ${model}.${operation} ran with no tenant scope. Row-level security ` +
+      `will return no rows once the application connects as erp_app — wrap the ` +
+      `entry point in runInTenantScope({ tenantId }), or withPageScope in a server ` +
+      `component.`,
+  );
 }
 
 type ExtendedPrismaClient = ReturnType<typeof createExtendedClient>;

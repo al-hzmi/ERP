@@ -34,9 +34,43 @@ const storage = new AsyncLocalStorage<TenantScope>();
  *
  * Returns whatever `work` returns, so this wraps an existing call without
  * changing its shape — `return runInTenantScope(scope, () => handler(...))`.
+ *
+ * The `.then()` below is not ceremony, and removing it reintroduces a bug that
+ * leaves no trace. A Prisma query is a *lazy* promise: constructing it issues
+ * nothing, and the query is sent when something subscribes. So for a callback that
+ * returns the query without awaiting it —
+ *
+ *     runInTenantScope(scope, () => prisma.user.findMany(...))   // no `async`
+ *
+ * — `storage.run` has already returned by the time the caller awaits, the
+ * subscription happens outside the store, and the client extension finds no tenant
+ * to bind. Under `erp_app` that read then returns zero rows: not an error, just an
+ * empty screen. An `async` callback happens to be safe, because the runtime adopts
+ * the returned thenable from inside the function's own context — which means the
+ * difference between correct and silently unscoped was the word `async`.
+ *
+ * Subscribing here, while the store is still active, makes both forms behave the
+ * same.
  */
 export function runInTenantScope<T>(scope: TenantScope, work: () => T): T {
-  return storage.run(scope, work);
+  return storage.run(scope, () => {
+    const result = work();
+
+    if (isThenable(result)) {
+      // Identity `then` — the point is *when* it is called, not what it does.
+      return result.then((value) => value) as T;
+    }
+
+    return result;
+  });
+}
+
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { then?: unknown }).then === 'function'
+  );
 }
 
 /** The current scope, or `undefined` outside one (migrations, seed, CLI). */

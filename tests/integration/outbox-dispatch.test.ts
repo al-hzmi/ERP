@@ -55,14 +55,22 @@ async function insertEvents(count: number, forTenant = tenantId): Promise<string
   return ids;
 }
 
-/** The claim statement the dispatcher issues, as a second concurrent worker. */
+/**
+ * The claim statement the dispatcher issues, as a second concurrent worker.
+ *
+ * Kept byte-for-byte equivalent to the one in `drainTenant`, tenant predicate
+ * included. Without that predicate this connects as the owner — which PostgreSQL
+ * exempts from the policy — and sweeps up whatever other suites have left in
+ * `outbox_events`, which is a flaky assertion rather than a demonstration.
+ */
 async function rivalClaim(workerId: string, batchSize: number): Promise<string[]> {
   const rows = await prisma.$queryRaw<{ id: string }[]>`
     UPDATE "outbox_events"
        SET "claimedAt" = now(), "claimedBy" = ${workerId}
      WHERE "id" IN (
              SELECT "id" FROM "outbox_events"
-              WHERE "processedAt" IS NULL AND NOT "deadLettered" AND "claimedAt" IS NULL
+              WHERE "tenantId" = ${tenantId}::uuid
+                AND "processedAt" IS NULL AND NOT "deadLettered" AND "claimedAt" IS NULL
               ORDER BY "occurredAt" LIMIT ${batchSize}
                 FOR UPDATE SKIP LOCKED
            )
