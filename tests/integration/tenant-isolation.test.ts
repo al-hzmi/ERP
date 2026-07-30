@@ -64,6 +64,16 @@ const TENANT_SCOPED_TABLES = [
   // unlike `rate_limit_counters`, which is consulted before authentication and
   // therefore deliberately has no policy at all.
   'request_idempotency',
+  // Added by migration 008. It had no policy at all until then: it was reachable only through
+  // its asset, so it carried no `tenantId` and migration 004 passed it over — leaving it
+  // readable across every tenant in the cluster. Migration 008 denormalises the tenant onto
+  // the row (kept honest by a trigger) so the standard policy applies.
+  //
+  // Six sibling tables are still in that position and deliberately absent from this list, so
+  // this count stays a drift guard rather than a wish: `fiscal_periods`, `zatca_invoices`,
+  // `bank_statement_lines`, `payroll_lines`, `approval_steps` and `approval_actions`. See
+  // README.md, known gaps.
+  'depreciation_schedules',
 ] as const;
 
 interface PolicyRow {

@@ -89,6 +89,7 @@ model Tenant {
   notifications       Notification[]
   fixedAssets         FixedAsset[]
   bankStatements      BankStatement[]
+  depreciationSchedules DepreciationSchedule[]
 
   @@index([isActive])
   @@map("tenants")
@@ -1396,17 +1397,33 @@ model FixedAsset {
 
 model DepreciationSchedule {
   id           String   @id @default(uuid()) @db.Uuid
+  /// Denormalised from the asset so the table can carry a row-level security policy of its
+  /// own. A trigger (migration 008) refuses any row whose tenant disagrees with its asset's,
+  /// so the denormalisation cannot drift into a second source of truth.
+  tenantId     String   @db.Uuid
   assetId      String   @db.Uuid
+  /// Last day of the month the charge belongs to.
   periodDate   DateTime @db.Date
   amount       Decimal  @db.Decimal(19, 4)
+  /// Accumulated depreciation after this period.
   accumulated  Decimal  @db.Decimal(19, 4)
+  /// `acquisitionCost - accumulated` after this period. Never below salvage.
   netBookValue Decimal  @db.Decimal(19, 4)
   isPosted     Boolean  @default(false)
+  /// The depreciation journal this charge was posted in. Present exactly when `isPosted`
+  /// (migration 008). No foreign key: `journals` is range-partitioned on `date` and its
+  /// primary key is `(id, date)`, which a single-column reference cannot target.
   journalId    String?  @db.Uuid
+  postedAt     DateTime? @db.Timestamptz(6)
 
-  asset FixedAsset @relation(fields: [assetId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  tenant Tenant     @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  asset  FixedAsset @relation(fields: [assetId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
+  /// Also the index the asset register reads a schedule by, so no separate one is declared.
   @@unique([assetId, periodDate])
+  /// The runner's hot query — everything due and unposted for a tenant — is served by a
+  /// partial index that Prisma cannot express (`depreciation_schedules_due_idx`, migration
+  /// 008). Declared in SQL only, as with the bank reconciliation indexes from migration 007.
   @@map("depreciation_schedules")
 }
 

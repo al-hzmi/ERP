@@ -22,7 +22,7 @@ cp .env.example .env        # then set AUTH_SECRET and ENCRYPTION_KEY
 #    openssl rand -hex 32      -> ENCRYPTION_KEY
 
 # 3. Database (PostgreSQL 15+)
-npm run db:migrate          # applies all seven migrations
+npm run db:migrate          # applies all eight migrations
 npm run db:seed             # generates and verifies a full demo company
 
 # 4. Run
@@ -38,7 +38,7 @@ meaningfully: `sales` can raise an invoice but not post it, `auditor` can read
 everything and change nothing.
 
 ```bash
-npm test           # 435 tests (299 unit + 136 integration)
+npm test           # 500 tests (331 unit + 169 integration)
 npm run typecheck  # strict TypeScript, no `any`, no `@ts-ignore`
 npm run build      # production build
 ```
@@ -109,18 +109,18 @@ src/
 └── styles/
 prisma/
 ├── schema.prisma             7 bounded contexts
-├── migrations/               7 migrations (see below)
+├── migrations/               8 migrations (see below)
 └── seed.ts + seed/           the data generator
 tests/
-├── unit/                     299 tests, no database required
-└── integration/              136 tests against real PostgreSQL
+├── unit/                     331 tests, no database required
+└── integration/              169 tests against real PostgreSQL
 ```
 
 Dependencies point inward. `domain/` imports nothing from `application/` or
 `infrastructure/`, which is why the entire accounting behaviour of the system is
 testable without a database.
 
-### The seven migrations
+### The eight migrations
 
 1. **`20260101000000_init`** — the schema Prisma generates.
 2. **`20260101000001_partitioning_constraints_triggers`** — everything Prisma
@@ -143,6 +143,12 @@ testable without a database.
    without creating a second invoice.
 7. **`20260801000000_bank_reconciliation_guards`** — the constraints `bank_statement_lines`
    never had, and the partial unique index that stops one payment being reconciled twice.
+8. **`20260802000000_fixed_asset_depreciation`** — `depreciation_schedules` had no
+   row-level security policy at all: it carried no `tenantId`, so migration 4's sweep
+   passed it over and it was readable across every tenant. This denormalises the tenant
+   onto the row (with a trigger refusing one that disagrees with its asset's), adds the
+   policy, ties `isPosted` to `journalId` as one fact, and stops an asset being
+   depreciated past its salvage value.
 
 Migration 4 installed the policies; making them *apply* took no further migration,
 only the application change that put every read path inside a tenant scope. See
@@ -176,6 +182,7 @@ only the application change that put every read path inside a tenant scope. See
 | Idempotent replay | `api/idempotency.ts` | The first outcome of a keyed mutation, returned verbatim for repeats — and refused outright when a key is reused with a different body, because that would answer with the wrong document's number |
 | The offline queue | `offline/queue.ts` | Oldest first, stop at the first undelivered submission, and one key per submission reused on every attempt: the three rules that keep a retry from becoming a second invoice |
 | Bank matching | `domain/treasury/bank-matching.ts` | Amount, direction and account are absolute — a 50-halala difference is a bank charge, not a 99% match — and the automatic pass declines anything ambiguous rather than tossing a coin |
+| Depreciation schedules | `domain/assets/depreciation.ts` | The schedule totals `cost − salvage` exactly and net book value never dips below salvage; declining balance switches to straight line and allocates the whole tail in one `split`, because recomputing it monthly makes a flat schedule jitter by fractions of a halala |
 
 ---
 
@@ -191,6 +198,7 @@ only the application change that put every read path inside a tenant scope. See
 | **Approval inbox** | `/approvals` | Only what is waiting on you, by the role its current step names |
 | **Stock card** | `/inventory/stock-card` | One product in one warehouse, movement by movement, running balance |
 | **Bank reconciliation** | `/treasury/reconciliation` | Statement lines against payment vouchers, with the difference answered at a glance |
+| **Fixed asset depreciation** | `/finance/depreciation` | The charges due this period, what the run will skip and why, and each asset's schedule progress |
 | Sign-in | `/login` | |
 
 Two conventions the entry screens share. Saving creates a **draft**; posting is a
@@ -349,8 +357,9 @@ Stated plainly rather than discovered later:
 - **Not every module has a screen.** The domain, application and API layers cover
   sales, procurement, inventory, treasury, financials and HR. The UI ships the
   dashboard, the sales register and invoice entry, the journal entry screen, the trial
-  balance, the approval inbox, the stock card and sign-in. Procurement, treasury,
-  payroll and the master-data maintenance screens are still API-only.
+  balance, the approval inbox, the stock card, bank reconciliation, the depreciation
+  run and sign-in. Procurement, payroll and the master-data maintenance screens are
+  still API-only.
 - **Offline mode covers data entry, not the whole application.** Drafts auto-save to
   IndexedDB and queued submissions replay under an idempotency key, so the two entry
   screens work with no connection. Everything that *reads* — the dashboard, the
@@ -361,4 +370,27 @@ Stated plainly rather than discovered later:
   content-hashed, and the offline fallback page. It never touches a non-GET request and
   never caches `/api/` — a cached tenant-scoped response could otherwise be served to the
   next person to sign in on the same device.
+- **Six child tables still have no row-level security policy.** `fiscal_periods`,
+  `zatca_invoices`, `bank_statement_lines`, `payroll_lines`, `approval_steps` and
+  `approval_actions`. Each is a child of a tenant-scoped parent and carries no `tenantId`
+  of its own, so migration 4's sweep — which selects tables by that column — passed over
+  all of them. Under `erp_app` they are readable and writable across every tenant in the
+  cluster, and one missing `WHERE` in one query over any of them is a cross-tenant leak
+  with nothing behind it. `depreciation_schedules` was the seventh and migration 008 fixed
+  it, using the pattern the rest would need: denormalise the tenant onto the row, add a
+  trigger that refuses a row disagreeing with its parent, then apply the standard policy.
+  The remaining six are a security migration in their own right, with their own tests, and
+  are not folded into a feature commit. `tenant-isolation.test.ts` names them in a comment
+  so its policy count stays a drift guard rather than a wish.
+- **Document numbering contends heavily under serialisable isolation.**
+  `erp_next_document_number` does an `INSERT … ON CONFLICT` on `number_sequences` inside
+  the caller's `SERIALIZABLE` transaction, and PostgreSQL's snapshot isolation takes
+  predicate locks on the unique index — so concurrent allocations conflict *across
+  tenants*, on different rows sharing index pages. `withTransaction` retries five times and
+  almost always wins; with six concurrent posting workloads the budget was exhausted about
+  one run in three. Measured, not theorised: it is why `vitest.config.ts` runs test files
+  serially. Fixing it properly means either allocating outside the serialisable snapshot or
+  reshaping the function to a single conflict-updating statement, and it wants a contention
+  benchmark rather than a guess — so the current state is stated here instead of patched
+  quietly.
 
