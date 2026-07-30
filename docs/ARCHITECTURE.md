@@ -52,7 +52,7 @@ each other's tables.
 ```
 
 `domain/` imports nothing from the outer layers. That is not architectural
-purity for its own sake: it is why 202 tests covering the whole of the system's
+purity for its own sake: it is why 244 tests covering the whole of the system's
 accounting behaviour run in under a second with no database.
 
 ### Bounded contexts
@@ -304,6 +304,33 @@ RTL is the default, not a translation layer.
 - Amounts are formatted from **strings** with manual thousands grouping.
   `Intl.NumberFormat` takes a `number` and would round a twelve-digit balance.
 
+### Data entry
+
+The screens that write follow three rules, and each exists because of a way the
+alternative goes wrong.
+
+**The domain computes; the component displays.** Invoice totals come from
+`calculateInvoice` and the journal balance from scale-4 `bigint`, both of them the
+same code the API posts through. A second implementation in the component would agree
+with the first until the day it did not, and the figure the user read before deciding
+to save is the one they would believe.
+
+**A half-typed value is excluded, not coerced.** `Money.of` throws on `"12."`, which a
+field holds for as long as it takes to type `"12.5"`. So `invoice-draft.ts` and
+`journal-draft.ts` screen every value first and leave an unfinished line out of the
+running total — out rather than at zero, because those read differently: a line being
+typed contributes nothing, a line worth zero is one the calculator should refuse.
+
+**Saving is not posting.** Every entry screen creates a DRAFT. Posting is a separate
+action behind a separate permission, because it is what puts a document in the ledger,
+in the ZATCA hash chain and beyond editing — a save button that did that quietly would
+be the single most expensive control in the system to get wrong.
+
+The picker choice follows the same reasoning as the rest: a native `<select>` for the
+eight branches a company has, and a debounced search against `/api/search` for the
+five thousand products. The search picker discards stale responses, without which
+typing `ورق` then `ورقة` renders whichever answer arrives last.
+
 ---
 
 ## 10. Non-functional posture
@@ -366,8 +393,14 @@ Ordered by what a real deployment would need next:
    before the user lookup in sign-in, and a development-time warning when a
    tenant-scoped model is queried unbound. Verified from a non-owner role rather
    than from the catalogue.
-4. Complete the UI: invoice entry form, journal entry screen, approval inbox,
-   stock card, remaining reports.
+4. ~~Complete the UI: invoice entry form, journal entry screen, approval inbox,
+   stock card.~~ Done. Two conventions run through all four: saving creates a draft
+   and posting stays a separate permissioned action, and every figure on screen is
+   computed by the domain rather than a second time in the component —
+   `calculateInvoice` for invoice totals, scale-4 `bigint` for the journal balance.
+   The approval workflow itself was schema-only until now; `approval-service.ts`
+   drives it. Remaining screens: procurement, treasury, payroll, master-data
+   maintenance and the rest of the reports.
 5. ZATCA onboarding: CSID acquisition, ECDSA signing (QR tags 7–9), clearance
    and reporting API integration.
 6. PWA offline mode — IndexedDB draft persistence and background sync.

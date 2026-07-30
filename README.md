@@ -38,7 +38,7 @@ meaningfully: `sales` can raise an invoice but not post it, `auditor` can read
 everything and change nothing.
 
 ```bash
-npm test           # 278 tests (202 unit + 76 integration)
+npm test           # 340 tests (244 unit + 96 integration)
 npm run typecheck  # strict TypeScript, no `any`, no `@ts-ignore`
 npm run build      # production build
 ```
@@ -112,8 +112,8 @@ prisma/
 ├── migrations/               5 migrations (see below)
 └── seed.ts + seed/           the data generator
 tests/
-├── unit/                     202 tests, no database required
-└── integration/              76 tests against real PostgreSQL
+├── unit/                     244 tests, no database required
+└── integration/              96 tests against real PostgreSQL
 ```
 
 Dependencies point inward. `domain/` imports nothing from `application/` or
@@ -165,6 +165,30 @@ only the application change that put every read path inside a tenant scope. See
 | Outbox claiming | `infrastructure/events/event-bus.ts` | A claim written by the statement that takes the lock, so it outlives the transaction — dispatch then happens outside one, because handlers do I/O |
 | The dispatch loop | `infrastructure/events/outbox-runner.ts` | `setTimeout` re-armed after each tick rather than `setInterval`, so a slow tick is never overlapped; jitter so replicas do not poll in lockstep |
 | Shared rate limits | `migrations/…_shared_rate_limits/migration.sql` | Read, decide and increment as one atomic unit per key, because expressed as separate statements two instances both get admitted |
+| Live invoice totals | `utils/invoice-draft.ts` | The entry form totals through the *same* `calculateInvoice` the API posts through, so the figure read before saving is the figure saved — and a half-typed line is excluded rather than counted as zero |
+| Approval workflow | `application/services/approval-service.ts` | Role-per-step, initiator excluded, one decision per step, and `SERIALIZABLE` so two approvers racing on a shared inbox cannot both advance it |
+| The scope seam for pages | `api/page.ts` | What `apiHandler` is to a route: redirect, then bind the tenant, in one place a server component cannot forget |
+
+---
+
+## The screens
+
+| Screen | Path | What it is for |
+|---|---|---|
+| Dashboard | `/` | Revenue, receivables, stock value, the month's activity |
+| Sales register | `/sales/invoices` | Server-paginated, filterable by status |
+| **Invoice entry** | `/sales/invoices/new` | Line grid with live exact totals; saves a DRAFT |
+| **Journal entry** | `/finance/journals/new` | Debit/credit grid, balance banner, submit blocked until it balances |
+| Trial balance | `/finance/trial-balance` | Balanced/unbalanced answered at a glance |
+| **Approval inbox** | `/approvals` | Only what is waiting on you, by the role its current step names |
+| **Stock card** | `/inventory/stock-card` | One product in one warehouse, movement by movement, running balance |
+| Sign-in | `/login` | |
+
+Two conventions the entry screens share. Saving creates a **draft**; posting is a
+separate, separately permissioned action, because posting is what puts a document in
+the ledger and in the ZATCA hash chain. And the arithmetic on screen comes from the
+domain — `calculateInvoice` for invoices, scale-4 `bigint` for the journal balance —
+so no total is computed twice by two implementations that might disagree.
 
 ---
 
@@ -264,11 +288,17 @@ Stated plainly rather than discovered later:
   within one window's decay, and specifically incapable of the 2x-limit burst a
   fixed window permits across a boundary. A precise implementation would need one
   row per request, which at the API bucket is a hundred inserts per key per minute.
-- **Approval workflows are modelled, not yet driven.** The schema, the policy
-  engine and the SoD checks are in place; the UI to walk a document through
-  multi-step approval is not.
+- **Approval requests are raised on request, not automatically.** The workflow now
+  runs — `approval-service.ts` raises requests, enforces the role and
+  segregation-of-duties rules, advances the steps and refuses a second decision, and
+  the inbox actions them. What is deliberately *not* wired yet is the posting path
+  calling `requestApproval` on its way through: making an invoice unpostable until
+  approved changes when documents can post, which is a policy decision rather than a
+  UI one. The seam is one function call.
 - **Not every module has a screen.** The domain, application and API layers cover
-  sales, procurement, inventory, treasury, financials and HR. The UI currently
-  ships the dashboard, the sales register, the trial balance and sign-in.
+  sales, procurement, inventory, treasury, financials and HR. The UI ships the
+  dashboard, the sales register and invoice entry, the journal entry screen, the trial
+  balance, the approval inbox, the stock card and sign-in. Procurement, treasury,
+  payroll and the master-data maintenance screens are still API-only.
 - **PWA offline mode is not implemented.** Auto-save drafts to IndexedDB and
   background sync are designed for but not built.

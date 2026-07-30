@@ -5,13 +5,17 @@ import { usePathname } from 'next/navigation';
 import {
   ArrowLeftRight,
   Banknote,
+  BookPlus,
   Boxes,
+  ClipboardCheck,
+  FilePlus2,
   ChevronsLeftRight,
   FileText,
   LayoutDashboard,
   Moon,
   Receipt,
   Scale,
+  ScrollText,
   Search,
   Sun,
   Users,
@@ -56,6 +60,7 @@ const NAVIGATION: readonly NavSection[] = [
     titleEn: 'Sales',
     items: [
       { href: '/sales/invoices', labelAr: 'فواتير المبيعات', labelEn: 'Sales Invoices', icon: Receipt },
+      { href: '/sales/invoices/new', labelAr: 'فاتورة جديدة', labelEn: 'New Invoice', icon: FilePlus2 },
       { href: '/sales/customers', labelAr: 'العملاء', labelEn: 'Customers', icon: Users },
     ],
   },
@@ -72,6 +77,7 @@ const NAVIGATION: readonly NavSection[] = [
     titleEn: 'Inventory',
     items: [
       { href: '/inventory/products', labelAr: 'الأصناف', labelEn: 'Products', icon: Boxes },
+      { href: '/inventory/stock-card', labelAr: 'بطاقة الصنف', labelEn: 'Stock Card', icon: ScrollText },
       { href: '/inventory/stock', labelAr: 'أرصدة المخزون', labelEn: 'Stock Balances', icon: Warehouse },
       { href: '/inventory/transfers', labelAr: 'التحويلات', labelEn: 'Transfers', icon: ArrowLeftRight },
     ],
@@ -81,8 +87,16 @@ const NAVIGATION: readonly NavSection[] = [
     titleEn: 'Financials',
     items: [
       { href: '/finance/journals', labelAr: 'القيود المحاسبية', labelEn: 'Journal Entries', icon: FileText },
+      { href: '/finance/journals/new', labelAr: 'قيد جديد', labelEn: 'New Journal Entry', icon: BookPlus },
       { href: '/finance/trial-balance', labelAr: 'ميزان المراجعة', labelEn: 'Trial Balance', icon: Scale },
       { href: '/treasury/payments', labelAr: 'سندات القبض والصرف', labelEn: 'Payment Vouchers', icon: Banknote },
+    ],
+  },
+  {
+    titleAr: 'الحاكمية',
+    titleEn: 'Governance',
+    items: [
+      { href: '/approvals', labelAr: 'صندوق الاعتمادات', labelEn: 'Approvals', icon: ClipboardCheck },
     ],
   },
 ];
