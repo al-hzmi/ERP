@@ -12,7 +12,7 @@ import type { ReactNode } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { getDashboardMetrics } from '@/lib/application/services/report-service';
-import { getRequestContext } from '@/lib/infrastructure/auth/request-context';
+import { withPageScope } from '@/lib/api/page';
 import { prisma } from '@/lib/infrastructure/db/prisma';
 import { formatMoney, formatQuantity } from '@/lib/utils/format';
 import { cn } from '@/lib/utils/cn';
@@ -30,15 +30,20 @@ export const metadata = { title: 'لوحة المعلومات' };
  * else. Everything below is read-only, so there is no mutation path to protect.
  */
 export default async function DashboardPage(): Promise<JSX.Element> {
-  const context = await getRequestContext();
-  if (!context.ok) return <p>غير مصرح.</p>;
+  const { tenant, metrics } = await withPageScope(async (context) => {
+    const loaded = await prisma.tenant.findUniqueOrThrow({
+      where: { id: context.tenantId },
+      select: { functionalCurrency: true, nameAr: true },
+    });
 
-  const tenant = await prisma.tenant.findUniqueOrThrow({
-    where: { id: context.value.tenantId },
-    select: { functionalCurrency: true, nameAr: true },
+    return {
+      tenant: loaded,
+      // Reads the ledgers, all of which are tenant-scoped — so this call is the
+      // reason the scope has to wrap the body rather than just the lookup above.
+      metrics: await getDashboardMetrics(context.tenantId, loaded.functionalCurrency),
+    };
   });
 
-  const metrics = await getDashboardMetrics(context.value.tenantId, tenant.functionalCurrency);
   const currency = tenant.functionalCurrency;
 
   const growth = metrics.revenueGrowthPercent;

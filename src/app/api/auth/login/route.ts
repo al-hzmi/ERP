@@ -13,22 +13,34 @@ import {
 import { lockoutDurationSeconds, verifyPassword } from '@/lib/infrastructure/auth/password';
 import { generateOpaqueToken, hashToken } from '@/lib/infrastructure/crypto/encryption';
 import { prisma, withTransaction } from '@/lib/infrastructure/db/prisma';
+import { runInTenantScope } from '@/lib/infrastructure/db/tenant-scope';
 import { logger } from '@/lib/infrastructure/logging/logger';
 import { checkRateLimit, resetRateLimit } from '@/lib/infrastructure/security/rate-limit';
 
 /**
  * Sign-in.
  *
- * Three things here are deliberate and easy to get wrong:
+ * Four things here are deliberate and easy to get wrong:
  *
  *  1. **The response never distinguishes an unknown user from a wrong password.**
- *     Doing so turns the login form into a free account-enumeration oracle.
+ *     Doing so turns the login form into a free account-enumeration oracle. An
+ *     unknown *tenant* is answered the same way, for the same reason.
  *  2. **Rate limiting is keyed on username AND address.** Keying on username
  *     alone lets one attacker lock every account out; on address alone lets a
  *     botnet walk straight past it.
  *  3. **A failed attempt still costs a bcrypt verification.** Returning early for
  *     an unknown user makes the response measurably faster and leaks exactly the
  *     fact rule 1 is protecting.
+ *  4. **The tenant is resolved before `users` is touched, and everything after
+ *     runs inside that scope.** Two reasons, and the second is a live bug rather
+ *     than a precaution:
+ *
+ *       - `users` is under a fail-closed RLS policy. A session with no tenant
+ *         bound sees no rows, so once the application connects as `erp_app`
+ *         instead of the table owner, an unscoped lookup authenticates nobody.
+ *       - `username` is unique per *tenant*, not globally. Searching without a
+ *         tenant made `findFirst` pick whichever row the plan happened to return
+ *         first, so with `admin` in two tenants a sign-in could land on either.
  */
 
 const loginSchema = z.object({
@@ -72,11 +84,65 @@ export async function POST(request: Request): Promise<NextResponse> {
     });
   }
 
+  // `tenants` carries no `tenantId` and therefore no policy, so this read works
+  // with nothing bound — which is exactly why it can be the thing that resolves
+  // the binding for everything after it.
+  const tenant = await resolveTenant(tenantCode);
+
+  if (tenant === 'ambiguous') {
+    // Not a credential failure: the caller omitted a parameter this deployment
+    // needs. Saying so plainly leaks nothing — the set of tenants is not a secret
+    // to someone who already had to be told which one to name.
+    return json(
+      DomainErrors.validation(
+        'يجب تحديد رمز المنشأة.',
+        'A tenant code is required on this deployment.',
+        'tenantCode',
+      ),
+      422,
+    );
+  }
+
+  if (tenant === null) {
+    // An unknown tenant code is answered exactly like a wrong password, and pays
+    // the same bcrypt cost, so the response neither says nor times differently.
+    await verifyPassword(password, DUMMY_HASH);
+    logger.warn('Failed sign-in attempt', { username, ipAddress, reason: 'unknown tenant' });
+    return json(
+      DomainErrors.validation(
+        'اسم المستخدم أو كلمة المرور غير صحيحة.',
+        'Invalid username or password.',
+      ),
+      401,
+    );
+  }
+
+  return runInTenantScope({ tenantId: tenant.id }, () =>
+    completeSignIn({ username, password, tenantId: tenant.id, rateKey, ipAddress, userAgent }),
+  );
+}
+
+interface SignInAttempt {
+  readonly username: string;
+  readonly password: string;
+  readonly tenantId: string;
+  readonly rateKey: string;
+  readonly ipAddress: string | null;
+  readonly userAgent: string | null;
+}
+
+/**
+ * Everything from the user lookup onwards, running with the tenant bound.
+ *
+ * Extracted so the scope wraps the whole of it. A scope that covered only the
+ * lookup would leave the lockout counter and the audit row to be written by an
+ * unbound session — writes that a fail-closed `WITH CHECK` rejects outright.
+ */
+async function completeSignIn(attempt: SignInAttempt): Promise<NextResponse> {
+  const { username, password, tenantId, rateKey, ipAddress, userAgent } = attempt;
+
   const user = await prisma.user.findFirst({
-    where: {
-      username,
-      ...(tenantCode !== undefined ? { tenant: { code: tenantCode } } : {}),
-    },
+    where: { username, tenantId },
     include: {
       tenant: { select: { id: true, isActive: true } },
       userRoles: {
@@ -207,10 +273,49 @@ export async function POST(request: Request): Promise<NextResponse> {
 }
 
 /**
+ * Works out which tenant is being signed into, before any tenant-scoped table is
+ * read.
+ *
+ * Returns the tenant, `null` when the named one does not exist or is inactive, or
+ * `'ambiguous'` when no code was supplied and the deployment holds more than one
+ * tenant to choose between.
+ *
+ * The single-tenant fallback is what keeps the demo — and every single-company
+ * deployment — from having to name a tenant it does not have a choice about. It is
+ * a fallback rather than a guess: with two tenants present the request is refused,
+ * because picking one would be exactly the arbitrary selection this replaces.
+ */
+async function resolveTenant(
+  tenantCode: string | undefined,
+): Promise<{ id: string } | null | 'ambiguous'> {
+  if (tenantCode !== undefined) {
+    return prisma.tenant.findFirst({
+      where: { code: tenantCode, isActive: true },
+      select: { id: true },
+    });
+  }
+
+  // `take: 2` answers "is there exactly one?" without counting a table that could
+  // hold thousands.
+  const candidates = await prisma.tenant.findMany({
+    where: { isActive: true },
+    select: { id: true },
+    take: 2,
+  });
+
+  if (candidates.length === 1) return candidates[0] ?? null;
+  return candidates.length === 0 ? null : 'ambiguous';
+}
+
+/**
  * Records a failed attempt and applies the escalating lockout.
  *
  * Deliberately not inside the caller's transaction: the counter must persist
  * even when everything else about the request is rejected.
+ *
+ * Runs within the caller's tenant scope, which `withTransaction` picks up from the
+ * ambient store — so the update and the audit row are both bound, and neither is
+ * rejected by the policy's `WITH CHECK`.
  */
 async function recordFailure(
   userId: string,
