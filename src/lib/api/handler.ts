@@ -90,7 +90,7 @@ export function apiHandler<T>(handler: Handler<T>, options: HandlerOptions = {})
         ? contextResult.value.userId
         : clientIdentifier(request);
 
-      const limit = checkRateLimit(options.rateLimit ?? 'api', identifier);
+      const limit = await checkRateLimit(options.rateLimit ?? 'api', identifier);
       if (!limit.allowed) {
         return failure(DomainErrors.rateLimited(limit.retryAfterSeconds), rateLimitHeaders(limit));
       }

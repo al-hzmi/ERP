@@ -237,10 +237,36 @@ Here, events are `INSERT`ed into `outbox_events` in the same transaction as the
 state change and dispatched after commit. A rolled-back transaction takes its
 events down with it.
 
-The dispatcher claims rows with `FOR UPDATE SKIP LOCKED`, so several instances
-can drain concurrently without double-processing. Handlers are isolated; one
-failing does not prevent the others. Five failed attempts dead-letters the event
-for a human rather than retrying forever against a bug.
+The dispatcher claims rows by *writing* a claim — `claimedAt` and `claimedBy`, set
+by an `UPDATE` whose subquery takes `FOR UPDATE SKIP LOCKED`. The distinction
+matters and was originally got wrong: the claim used to be a standalone
+`SELECT ... FOR UPDATE SKIP LOCKED`, and a row lock lives exactly as long as the
+transaction holding it. A standalone statement commits when it returns, so the lock
+was released before the first handler ran and two dispatchers both delivered the
+same event. A written claim survives the transaction that took it; a lock cannot.
+
+Dispatch then happens *outside* any transaction, which is the reason the claim has
+to survive one at all. Handlers do I/O, and a transaction parked on a network call
+holds its snapshot, its locks and a connection from a pool of twenty for as long as
+the slowest subscriber takes.
+
+Draining is per tenant rather than one pass over the table, because `outbox_events`
+is under a fail-closed RLS policy: a session with no tenant bound sees nothing. The
+tenant predicate is also written explicitly in the claim, because PostgreSQL exempts
+a table's owner from its own policies and the application still connects as the
+owner — so the predicate is the control and the policy is the backstop.
+
+Handlers are isolated; one failing does not prevent the others. Five failed attempts
+dead-letters the event for a human rather than retrying forever against a bug. A
+worker killed mid-dispatch leaves a claim behind, which `reclaimStaleClaims` releases
+after a horizon — charging an attempt, so an event that keeps killing its worker
+eventually dead-letters instead of cycling forever.
+
+`OutboxRunner` is the scheduler: `setTimeout` re-armed after each tick rather than
+`setInterval`, so a slow tick is never overlapped by the next one, plus jitter so
+replicas do not poll in lockstep. Run it as its own process
+(`npm run outbox:worker`), or call `outboxRunner.tick()` from a scheduled request
+where no long-lived process is available.
 
 The event catalogue is a typed map, so `on('sales.invoice.posted', e => e.payload.total)`
 cannot mistype `total`, and renaming a field breaks every stale handler at
@@ -317,8 +343,14 @@ Stated because they are decisions, not facts:
 
 Ordered by what a real deployment would need next:
 
-1. Wire `drainOutbox()` to a scheduled worker.
-2. Move rate limiting to Redis for multi-instance deployments.
+1. ~~Wire `drainOutbox()` to a scheduled worker.~~ Done — `OutboxRunner` and
+   `scripts/outbox-worker.ts`, with the claim made genuinely concurrency-safe.
+2. ~~Move rate limiting to Redis for multi-instance deployments.~~ Done, in
+   PostgreSQL rather than Redis. The counter is shared, which was the requirement;
+   the store it lives in was a means. Redis would have added an operational
+   dependency to a stack that has none, for a table that sees one small upsert per
+   request — and `RateLimitStore` is a two-method interface, so a Redis
+   implementation remains a drop-in if the write volume ever justifies one.
 3. Complete the UI: invoice entry form, journal entry screen, approval inbox,
    stock card, remaining reports.
 4. ZATCA onboarding: CSID acquisition, ECDSA signing (QR tags 7–9), clearance
