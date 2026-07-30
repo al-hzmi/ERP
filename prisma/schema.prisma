@@ -132,6 +132,7 @@ model User {
   createdJournals   Journal[]  @relation("JournalCreatedBy")
   postedJournals    Journal[]  @relation("JournalPostedBy")
   createdPayments   Payment[]  @relation("PaymentCreatedBy")
+  reconciledStatements BankStatement[] @relation("StatementReconciledBy")
   postedPayments    Payment[]  @relation("PaymentPostedBy")
   approvalActions   ApprovalAction[]
 
@@ -1141,11 +1142,17 @@ model BankStatement {
   periodEnd    DateTime @db.Date
   openingBalance Decimal @db.Decimal(19, 4)
   closingBalance Decimal @db.Decimal(19, 4)
+  /// A person asserted that this statement agrees with the ledger. Never set without
+  /// `reconciledById` — an assertion nobody's name is against is one nobody can be asked
+  /// about, and migration 007 enforces the pairing.
   isReconciled Boolean  @default(false)
+  reconciledAt DateTime? @db.Timestamptz(6)
+  reconciledById String? @db.Uuid
   createdAt    DateTime @default(now()) @db.Timestamptz(6)
 
   tenant  Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   account Account             @relation(fields: [accountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  reconciledBy User?          @relation("StatementReconciledBy", fields: [reconciledById], references: [id], onDelete: Restrict, onUpdate: Cascade)
   lines   BankStatementLine[]
 
   @@unique([tenantId, accountId, statementRef])
@@ -1158,9 +1165,15 @@ model BankStatementLine {
   valueDate       DateTime @db.Date
   description     String   @db.VarChar(512)
   reference       String?  @db.VarChar(128)
+  /// Money *into* the account, following the company's ledger rather than the bank's:
+  /// a deposit is a debit. The opposite of how a bank's own statement paper reads, because
+  /// `accountId` is the company's GL account. Exactly one side is non-zero (migration 007).
   debit           Decimal  @default(0) @db.Decimal(19, 4)
+  /// Money out of the account.
   credit          Decimal  @default(0) @db.Decimal(19, 4)
-  /// Payment this line was matched to during reconciliation.
+  /// Payment this line was matched to during reconciliation. At most one line per
+  /// payment — a payment reconciled twice hides a real unexplained difference, which
+  /// migration 007 enforces with a partial unique index.
   matchedPaymentId String? @db.Uuid
   matchedAt       DateTime? @db.Timestamptz(6)
   /// Confidence of an automatic match (0..100); manual matches are 100.

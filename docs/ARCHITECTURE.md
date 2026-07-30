@@ -52,7 +52,7 @@ each other's tables.
 ```
 
 `domain/` imports nothing from the outer layers. That is not architectural
-purity for its own sake: it is why 269 tests covering the whole of the system's
+purity for its own sake: it is why 299 tests covering the whole of the system's
 accounting behaviour run in under a second with no database.
 
 ### Bounded contexts
@@ -437,7 +437,25 @@ Ordered by what a real deployment would need next:
 
    Scope is deliberately narrow: entry works offline, reading does not. The service worker
    never serves an API response from a cache and never mediates a non-GET request.
-7. Bank reconciliation matching UI over the existing schema.
+7. ~~Bank reconciliation matching UI over the existing schema.~~ Done, and the schema
+   needed guards before a screen could safely write to it.
+
+   The exercise produces one number — the difference between what the bank says and what
+   the ledger says — and every part of it must be attributable. So the arithmetic is stated
+   as a partition: matched, statement-only, books-only, giving
+   `bank closing − statement-only = matched = book balance − books-only`. Sign-off is
+   refused unless the difference is exactly zero, because a button that let someone assert
+   agreement that does not exist would make `isReconciled` mean "somebody clicked".
+
+   The matcher treats amount, direction and bank account as absolute rather than scored: a
+   50-halala difference is a bank charge or a partial settlement, not a 99% match, and
+   offering it invites someone to reconcile a discrepancy away. The automatic pass declines
+   anything ambiguous — two identical transfers on the same day is Tuesday, and picking the
+   first would be a coin toss recorded as a reconciliation.
+
+   Migration 007 adds the constraints these tables never had, including the partial unique
+   index that stops one payment being reconciled twice — which would make the balances
+   appear to agree while concealing a genuine unexplained difference.
 8. Fixed-asset depreciation run and posting schedule.
 9. Partition maintenance job calling `erp_ensure_year_partition` ahead of time.
    Deliberately last: migration 2 pre-creates yearly partitions through 2032 and
