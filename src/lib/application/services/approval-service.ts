@@ -364,6 +364,7 @@ export async function decideApproval(input: {
 
     await tx.approvalAction.create({
       data: {
+        tenantId: input.tenantId,
         requestId: request.id,
         stepNumber: request.currentStep,
         userId: input.userId,

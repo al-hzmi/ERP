@@ -88,6 +88,7 @@ async function createLine(input: {
 }): Promise<string> {
   const line = await prisma.bankStatementLine.create({
     data: {
+      tenantId,
       bankStatementId: statementId,
       valueDate: new Date(input.date),
       description: input.description ?? 'حركة بنكية',

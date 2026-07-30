@@ -122,6 +122,7 @@ export async function generateZatcaInvoice(
 
   await tx.zatcaInvoice.create({
     data: {
+      tenantId: input.tenantId,
       documentId: input.documentId,
       invoiceUuid,
       previousHash,

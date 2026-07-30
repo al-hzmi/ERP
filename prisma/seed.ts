@@ -36,6 +36,7 @@ import { postSalesInvoice } from '../src/lib/application/use-cases/post-sales-in
 import { postPurchaseInvoice } from '../src/lib/application/use-cases/post-purchase-invoice';
 import { recordPayment } from '../src/lib/application/use-cases/record-payment';
 import { transferStock } from '../src/lib/application/services/inventory-service';
+import { generateSchedule, runDepreciation } from '../src/lib/application/services/depreciation-service';
 import { encryptField } from '../src/lib/infrastructure/crypto/encryption';
 import { hashPassword } from '../src/lib/infrastructure/auth/password';
 import { PermissionSet, SYSTEM_ROLES, expandPermissionCatalogue } from '../src/lib/infrastructure/auth/rbac';
@@ -149,6 +150,7 @@ async function main(): Promise<void> {
   await generateTransfersAndAdjustments(context, { org, catalogue, stock, accounts });
   await generatePayments(context, org);
   await generateGeneralJournals(context, accounts, org.branchIds);
+  await createFixedAssets(context, accounts, org.branchIds);
 
   const report = await verify(tenantId);
 
@@ -355,6 +357,7 @@ async function createFiscalCalendar(tenantId: string): Promise<void> {
 
     await prisma.fiscalPeriod.createMany({
       data: Array.from({ length: 12 }, (_, index) => ({
+        tenantId,
         fiscalYearId: fiscalYear.id,
         periodNumber: index + 1,
         startDate: new Date(Date.UTC(year, index, 1)),
@@ -866,6 +869,147 @@ async function createCounterparties(
 
   log('Counterparties created', `${customerIds.length} customers, ${supplierIds.length} suppliers`);
   return { customerIds, supplierIds };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Fixed assets
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A small asset register, and the depreciation actually run over part of it.
+ *
+ * Deliberately not a uniform set. The register is the input to the depreciation screen, and a
+ * screen is only worth looking at if it can show the states it exists to distinguish — so this
+ * produces an asset whose schedule is fully caught up, one deliberately left with no schedule
+ * at all (absent from a run rather than late, which a run result alone cannot say), one on
+ * declining balance so the switch to straight line is visible in the figures, and one disposed
+ * so it can be seen being skipped.
+ *
+ * The depreciation is then posted through the real service rather than written by hand, for the
+ * same reason every other document here is: the dataset cannot contain a state the application
+ * would refuse to produce.
+ */
+async function createFixedAssets(
+  context: RequestContext,
+  accounts: AccountIndex,
+  branchIds: readonly string[],
+): Promise<void> {
+  const existing = await prisma.fixedAsset.count({ where: { tenantId: context.tenantId } });
+  if (existing > 0) return;
+
+  const branchId = branchIds[0];
+  if (branchId === undefined) return;
+
+  const expense = accounts.byCode.get('5-3-10-001');
+  const groups = [
+    { asset: '1-2-01-001', accumulated: '1-2-02-001', label: 'أثاث ومعدات' },
+    { asset: '1-2-01-002', accumulated: '1-2-02-002', label: 'أجهزة حاسب' },
+    { asset: '1-2-01-003', accumulated: '1-2-02-003', label: 'سيارات' },
+  ];
+
+  if (expense === undefined) return;
+
+  interface AssetSpec {
+    readonly name: string;
+    readonly group: number;
+    readonly cost: string;
+    readonly salvage: string;
+    readonly months: number;
+    readonly method: 'STRAIGHT_LINE' | 'DECLINING_BALANCE';
+    readonly acquired: string;
+    readonly schedule: boolean;
+    readonly disposed?: string;
+  }
+
+  const specs: AssetSpec[] = [
+    { name: 'أثاث المقر الرئيسي', group: 0, cost: '240000.00', salvage: '24000.00', months: 120, method: 'STRAIGHT_LINE', acquired: `${FISCAL_YEAR}-01-15`, schedule: true },
+    { name: 'خوادم مركز البيانات', group: 1, cost: '180000.00', salvage: '18000.00', months: 48, method: 'DECLINING_BALANCE', acquired: `${FISCAL_YEAR}-01-20`, schedule: true },
+    { name: 'أجهزة حاسب الفروع', group: 1, cost: '96000.00', salvage: '6000.00', months: 36, method: 'STRAIGHT_LINE', acquired: `${FISCAL_YEAR}-02-01`, schedule: true },
+    { name: 'شاحنة توزيع', group: 2, cost: '320000.00', salvage: '80000.00', months: 84, method: 'DECLINING_BALANCE', acquired: `${FISCAL_YEAR}-01-10`, schedule: true },
+    // No schedule on purpose: this is what "absent from the run" looks like on the screen.
+    { name: 'مكيفات المستودع', group: 0, cost: '64000.00', salvage: '4000.00', months: 60, method: 'STRAIGHT_LINE', acquired: `${FISCAL_YEAR}-03-01`, schedule: false },
+    // Disposed, so the run has something to leave out.
+    { name: 'سيارة إدارية مستبعدة', group: 2, cost: '140000.00', salvage: '20000.00', months: 72, method: 'STRAIGHT_LINE', acquired: `${FISCAL_YEAR}-01-05`, schedule: true, disposed: `${FISCAL_YEAR}-05-31` },
+  ];
+
+  let created = 0;
+
+  for (const [index, spec] of specs.entries()) {
+    const group = groups[spec.group];
+    const assetAccount = group === undefined ? undefined : accounts.byCode.get(group.asset);
+    const accumulatedAccount =
+      group === undefined ? undefined : accounts.byCode.get(group.accumulated);
+    if (assetAccount === undefined || accumulatedAccount === undefined) continue;
+
+    const asset = await prisma.fixedAsset.create({
+      data: {
+        tenantId: context.tenantId,
+        assetNumber: `FA-${String(index + 1).padStart(4, '0')}`,
+        nameAr: spec.name,
+        nameEn: spec.name,
+        branchId,
+        acquisitionDate: new Date(spec.acquired),
+        acquisitionCost: spec.cost,
+        salvageValue: spec.salvage,
+        usefulLifeMonths: spec.months,
+        method: spec.method,
+        decliningFactor: spec.method === 'DECLINING_BALANCE' ? '2' : '2',
+        // Migration 008 requires netBookValue to equal cost − accumulated.
+        netBookValue: spec.cost,
+        assetAccountId: assetAccount,
+        accumulatedAccountId: accumulatedAccount,
+        expenseAccountId: expense,
+        ...(spec.disposed !== undefined ? { disposedAt: new Date(spec.disposed) } : {}),
+      },
+      select: { id: true },
+    });
+
+    created += 1;
+
+    if (spec.schedule) {
+      // A disposed asset is refused a schedule, which is correct — so it is generated first
+      // and the disposal applied after, which is also the real order of events.
+      if (spec.disposed !== undefined) {
+        await prisma.fixedAsset.update({ where: { id: asset.id }, data: { disposedAt: null } });
+      }
+
+      const result = await generateSchedule({
+        tenantId: context.tenantId,
+        assetId: asset.id,
+        audit: auditFrom(withNewCorrelation(context)),
+      });
+
+      if (!result.ok) throw new Error(`Schedule generation failed: ${result.error.messageEn}`);
+
+      if (spec.disposed !== undefined) {
+        await prisma.fixedAsset.update({
+          where: { id: asset.id },
+          data: { disposedAt: new Date(spec.disposed) },
+        });
+      }
+    }
+  }
+
+  log('Fixed assets complete', `${created} assets registered`);
+
+  // Post the first four months, leaving the rest of the year due — so the screen opens with
+  // both a history to read and something to run.
+  const asOf = DateOnly.create(`${FISCAL_YEAR}-04-30`);
+  if (!asOf.ok) return;
+
+  const run = await runDepreciation({
+    tenantId: context.tenantId,
+    asOf: asOf.value,
+    userId: context.userId,
+    audit: auditFrom(withNewCorrelation(context)),
+  });
+
+  if (!run.ok) throw new Error(`Depreciation run failed: ${run.error.messageEn}`);
+
+  log(
+    'Depreciation posted',
+    `${run.value.postedCount} charges, ${run.value.totalAmount} SAR, ${run.value.skipped.length} asset(s) skipped`,
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

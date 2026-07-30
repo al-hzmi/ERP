@@ -90,6 +90,12 @@ model Tenant {
   fixedAssets         FixedAsset[]
   bankStatements      BankStatement[]
   depreciationSchedules DepreciationSchedule[]
+  fiscalPeriods       FiscalPeriod[]
+  zatcaInvoices       ZatcaInvoice[]
+  bankStatementLines  BankStatementLine[]
+  payrollLines        PayrollLine[]
+  approvalSteps       ApprovalStep[]
+  approvalActions     ApprovalAction[]
 
   @@index([isActive])
   @@map("tenants")
@@ -621,13 +627,18 @@ model FiscalYear {
 
 model FiscalPeriod {
   id           String       @id @default(uuid()) @db.Uuid
-  fiscalYearId String       @db.Uuid
+    /// Denormalised from its fiscal year so this table can carry a row-level security policy of its
+  /// own. A trigger (migration 009) refuses any row whose tenant disagrees with its parent's,
+  /// so the denormalisation cannot become a second source of truth.
+  tenantId String @db.Uuid
+fiscalYearId String       @db.Uuid
   /// 1..12 for calendar months; 13 reserved for year-end adjustments.
   periodNumber Int
   startDate    DateTime     @db.Date
   endDate      DateTime     @db.Date
   status       FiscalStatus @default(OPEN)
 
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   fiscalYear FiscalYear @relation(fields: [fiscalYearId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   journals   Journal[]
 
@@ -943,7 +954,11 @@ model DocumentLine {
 /// ZATCA Phase 2 (Fatoora) e-invoicing envelope. One row per posted sales invoice.
 model ZatcaInvoice {
   id             String   @id @default(uuid()) @db.Uuid
-  documentId     String   @unique @db.Uuid
+    /// Denormalised from its document so this table can carry a row-level security policy of its
+  /// own. A trigger (migration 009) refuses any row whose tenant disagrees with its parent's,
+  /// so the denormalisation cannot become a second source of truth.
+  tenantId String @db.Uuid
+documentId     String   @unique @db.Uuid
   /// Invoice UUID required by the ZATCA XML (`cbc:UUID`).
   invoiceUuid    String   @unique @db.Uuid
   /// SHA-256 of the previous invoice's canonicalised XML — the invoice hash chain.
@@ -961,6 +976,7 @@ model ZatcaInvoice {
   clearanceStatus String?  @db.VarChar(32)
   createdAt      DateTime @default(now()) @db.Timestamptz(6)
 
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   document Document @relation(fields: [documentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
   @@index([issuedAtUtc])
@@ -1162,7 +1178,11 @@ model BankStatement {
 
 model BankStatementLine {
   id              String   @id @default(uuid()) @db.Uuid
-  bankStatementId String   @db.Uuid
+    /// Denormalised from its statement so this table can carry a row-level security policy of its
+  /// own. A trigger (migration 009) refuses any row whose tenant disagrees with its parent's,
+  /// so the denormalisation cannot become a second source of truth.
+  tenantId String @db.Uuid
+bankStatementId String   @db.Uuid
   valueDate       DateTime @db.Date
   description     String   @db.VarChar(512)
   reference       String?  @db.VarChar(128)
@@ -1180,6 +1200,7 @@ model BankStatementLine {
   /// Confidence of an automatic match (0..100); manual matches are 100.
   matchScore      Int?
 
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   bankStatement  BankStatement @relation(fields: [bankStatementId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   matchedPayment Payment?      @relation(fields: [matchedPaymentId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
@@ -1270,7 +1291,11 @@ model PayrollRun {
 
 model PayrollLine {
   id            String  @id @default(uuid()) @db.Uuid
-  payrollRunId  String  @db.Uuid
+    /// Denormalised from its payroll run so this table can carry a row-level security policy of its
+  /// own. A trigger (migration 009) refuses any row whose tenant disagrees with its parent's,
+  /// so the denormalisation cannot become a second source of truth.
+  tenantId String @db.Uuid
+payrollRunId  String  @db.Uuid
   employeeId    String  @db.Uuid
   basicSalary   Decimal @db.Decimal(19, 4)
   allowances    Decimal @default(0) @db.Decimal(19, 4)
@@ -1280,6 +1305,7 @@ model PayrollLine {
   net           Decimal @db.Decimal(19, 4)
   breakdownJson Json    @default("{}")
 
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   payrollRun PayrollRun @relation(fields: [payrollRunId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   employee   Employee   @relation(fields: [employeeId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
@@ -1310,12 +1336,17 @@ model ApprovalPolicy {
 
 model ApprovalStep {
   id         String  @id @default(uuid()) @db.Uuid
-  policyId   String  @db.Uuid
+    /// Denormalised from its policy so this table can carry a row-level security policy of its
+  /// own. A trigger (migration 009) refuses any row whose tenant disagrees with its parent's,
+  /// so the denormalisation cannot become a second source of truth.
+  tenantId String @db.Uuid
+policyId   String  @db.Uuid
   stepNumber Int
   roleId     String  @db.Uuid
   /// When true, the document's creator may not satisfy this step (SoD hard rule).
   excludeInitiator Boolean @default(true)
 
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   policy ApprovalPolicy @relation(fields: [policyId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   role   Role           @relation(fields: [roleId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
@@ -1346,13 +1377,18 @@ model ApprovalRequest {
 
 model ApprovalAction {
   id        String         @id @default(uuid()) @db.Uuid
-  requestId String         @db.Uuid
+    /// Denormalised from its request so this table can carry a row-level security policy of its
+  /// own. A trigger (migration 009) refuses any row whose tenant disagrees with its parent's,
+  /// so the denormalisation cannot become a second source of truth.
+  tenantId String @db.Uuid
+requestId String         @db.Uuid
   stepNumber Int
   userId    String         @db.Uuid
   decision  ApprovalStatus
   comment   String?        @db.VarChar(512)
   actedAt   DateTime       @default(now()) @db.Timestamptz(6)
 
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   request ApprovalRequest @relation(fields: [requestId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   user    User            @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 

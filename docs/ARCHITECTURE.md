@@ -507,7 +507,38 @@ Ordered by what a real deployment would need next:
    integration test that reopened a period after later ones were charged is what exposed
    it. It now looks for a posted period later than an unposted one, which is the actual
    invariant.
-9. Partition maintenance job calling `erp_ensure_year_partition` ahead of time.
+9. ~~Close the row-level security gap on the remaining child tables.~~ Done — migration 009,
+   and raised to the top of the list ahead of partition maintenance because it was a live
+   cross-tenant exposure rather than an optimisation.
+
+   Migration 004 selects the tables it protects *by looking for a `tenantId` column*. Six
+   tables were reachable only through a tenant-scoped parent, carried no such column, and were
+   therefore invisible to it: `fiscal_periods`, `zatca_invoices`, `bank_statement_lines`,
+   `payroll_lines`, `approval_steps`, `approval_actions`. Under `erp_app` all six were
+   readable and writable across every tenant in the cluster. Two are as sensitive as anything
+   in the schema — `payroll_lines` is individual salaries and `bank_statement_lines` is a
+   company's entire cash movement.
+
+   The tenant is denormalised onto each row rather than the policy joining to the parent. An
+   `EXISTS (SELECT 1 FROM parent ...)` policy runs per row on every read, and on
+   `bank_statement_lines` — which the reconciliation screen scans by the hundred — that turns
+   a policy costing nothing into one that dominates the query. Denormalising costs 16 bytes a
+   row and makes the policy an index-backed equality.
+
+   What denormalising risks is a second, disagreeing source of truth, so each table gets a
+   trigger refusing any row whose tenant differs from its parent's — one generic function
+   parameterised through `TG_ARGV`, because six near-identical ones would be six chances for
+   one to drift. It raises rather than silently correcting: a mismatch means calling code has a
+   bug, and rewriting the value would hide it. The trigger fires on UPDATE as well as INSERT,
+   since an insert-only guard leaves the same hole one step later.
+
+   The part worth keeping is the last assertion. Rather than restating the same list a third
+   time, migration 009 asserts the *inverse* property at deploy time: every table in the schema
+   either has a tenant-isolation policy or appears on an explicit exempt list with its reason
+   written next to it. That converts "someone must remember" into "the deploy fails" — which is
+   the only reason this gap existed for nine migrations. `child-table-isolation.test.ts`
+   repeats it so it is checked on every run, not only when a migration is applied.
+10. Partition maintenance job calling `erp_ensure_year_partition` ahead of time.
    Deliberately last: migration 2 pre-creates yearly partitions through 2032 and
    every parent has a DEFAULT partition, so an out-of-range insert is slower rather
    than rejected. This is an optimisation with a 2032 deadline, not a latent outage.

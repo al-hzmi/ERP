@@ -69,11 +69,23 @@ const TENANT_SCOPED_TABLES = [
   // readable across every tenant in the cluster. Migration 008 denormalises the tenant onto
   // the row (kept honest by a trigger) so the standard policy applies.
   //
-  // Six sibling tables are still in that position and deliberately absent from this list, so
-  // this count stays a drift guard rather than a wish: `fiscal_periods`, `zatca_invoices`,
-  // `bank_statement_lines`, `payroll_lines`, `approval_steps` and `approval_actions`. See
-  // README.md, known gaps.
   'depreciation_schedules',
+  // Added by migration 009, which closed the same gap on the remaining six child tables. Each
+  // was reachable only through a tenant-scoped parent, carried no `tenantId`, and so was
+  // invisible to migration 004 — which selects its targets *by* that column. Two of these are
+  // as sensitive as anything in the schema: `payroll_lines` is individual salaries and
+  // `bank_statement_lines` is a company's entire cash movement.
+  //
+  // Migration 009 also asserts the inverse and stronger property at deploy time: every table
+  // in the schema either has a tenant-isolation policy or is on an explicit exempt list with a
+  // stated reason. A new child table added without one now fails `migrate deploy` rather than
+  // waiting to be noticed in a diff.
+  'fiscal_periods',
+  'zatca_invoices',
+  'bank_statement_lines',
+  'payroll_lines',
+  'approval_steps',
+  'approval_actions',
 ] as const;
 
 interface PolicyRow {

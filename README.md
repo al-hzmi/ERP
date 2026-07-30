@@ -22,7 +22,7 @@ cp .env.example .env        # then set AUTH_SECRET and ENCRYPTION_KEY
 #    openssl rand -hex 32      -> ENCRYPTION_KEY
 
 # 3. Database (PostgreSQL 15+)
-npm run db:migrate          # applies all eight migrations
+npm run db:migrate          # applies all nine migrations
 npm run db:seed             # generates and verifies a full demo company
 
 # 4. Run
@@ -38,7 +38,7 @@ meaningfully: `sales` can raise an invoice but not post it, `auditor` can read
 everything and change nothing.
 
 ```bash
-npm test           # 500 tests (331 unit + 169 integration)
+npm test           # 509 tests (331 unit + 178 integration)
 npm run typecheck  # strict TypeScript, no `any`, no `@ts-ignore`
 npm run build      # production build
 ```
@@ -109,18 +109,18 @@ src/
 └── styles/
 prisma/
 ├── schema.prisma             7 bounded contexts
-├── migrations/               8 migrations (see below)
+├── migrations/               9 migrations (see below)
 └── seed.ts + seed/           the data generator
 tests/
 ├── unit/                     331 tests, no database required
-└── integration/              169 tests against real PostgreSQL
+└── integration/              178 tests against real PostgreSQL
 ```
 
 Dependencies point inward. `domain/` imports nothing from `application/` or
 `infrastructure/`, which is why the entire accounting behaviour of the system is
 testable without a database.
 
-### The eight migrations
+### The nine migrations
 
 1. **`20260101000000_init`** — the schema Prisma generates.
 2. **`20260101000001_partitioning_constraints_triggers`** — everything Prisma
@@ -149,6 +149,13 @@ testable without a database.
    onto the row (with a trigger refusing one that disagrees with its asset's), adds the
    policy, ties `isPosted` to `journalId` as one fact, and stops an asset being
    depreciated past its salvage value.
+9. **`20260803000000_close_child_table_rls_gap`** — the same gap on the six remaining child
+   tables: `fiscal_periods`, `zatca_invoices`, `bank_statement_lines`, `payroll_lines`,
+   `approval_steps`, `approval_actions`. Two of them are as sensitive as anything in the
+   schema — `payroll_lines` is individual salaries, `bank_statement_lines` is a company's
+   entire cash movement. It also asserts, at deploy time, that *every* table either has a
+   tenant-isolation policy or is on an explicit exempt list with a stated reason, so a new
+   child table added without one fails the deploy instead of waiting to be noticed.
 
 Migration 4 installed the policies; making them *apply* took no further migration,
 only the application change that put every read path inside a tenant scope. See
@@ -323,6 +330,13 @@ true for anyone who picks the item up.
   PostgreSQL exempts a table's owner from its own policies — the control existed and
   did nothing. `tenant-isolation-as-app-role.test.ts` asserts on rows from a role the
   policies apply to, which is the only way to demonstrate the difference.
+- **Every table is covered, and the deploy proves it** — migration 009 asserts that each
+  table in the schema either carries a tenant-isolation policy or appears on an explicit
+  exempt list with its reason stated. This exists because migration 004 selected its targets
+  *by looking for a `tenantId` column*, so seven child tables reachable only through a parent
+  were invisible to it and stayed cross-tenant readable for five migrations. Restating the
+  list correctly would only have postponed the next omission; asserting the inverse property
+  turns it into a failed deploy.
 - **A forgotten scope is loud** — the client extension warns, in development, when a
   model carrying `tenantId` is queried with nothing bound. The models are derived
   from the schema rather than listed, so adding one cannot quietly escape the check.
@@ -370,18 +384,6 @@ Stated plainly rather than discovered later:
   content-hashed, and the offline fallback page. It never touches a non-GET request and
   never caches `/api/` — a cached tenant-scoped response could otherwise be served to the
   next person to sign in on the same device.
-- **Six child tables still have no row-level security policy.** `fiscal_periods`,
-  `zatca_invoices`, `bank_statement_lines`, `payroll_lines`, `approval_steps` and
-  `approval_actions`. Each is a child of a tenant-scoped parent and carries no `tenantId`
-  of its own, so migration 4's sweep — which selects tables by that column — passed over
-  all of them. Under `erp_app` they are readable and writable across every tenant in the
-  cluster, and one missing `WHERE` in one query over any of them is a cross-tenant leak
-  with nothing behind it. `depreciation_schedules` was the seventh and migration 008 fixed
-  it, using the pattern the rest would need: denormalise the tenant onto the row, add a
-  trigger that refuses a row disagreeing with its parent, then apply the standard policy.
-  The remaining six are a security migration in their own right, with their own tests, and
-  are not folded into a feature commit. `tenant-isolation.test.ts` names them in a comment
-  so its policy count stays a drift guard rather than a wish.
 - **Document numbering contends heavily under serialisable isolation.**
   `erp_next_document_number` does an `INSERT … ON CONFLICT` on `number_sequences` inside
   the caller's `SERIALIZABLE` transaction, and PostgreSQL's snapshot isolation takes

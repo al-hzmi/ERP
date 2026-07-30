@@ -859,6 +859,7 @@ async function buildFixture(): Promise<Fixture> {
 
   await prisma.fiscalPeriod.createMany({
     data: Array.from({ length: 12 }, (_, index) => ({
+      tenantId: tenant.id,
       fiscalYearId: fiscalYear.id,
       periodNumber: index + 1,
       startDate: new Date(Date.UTC(2026, index, 1)),

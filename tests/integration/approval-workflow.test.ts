@@ -64,8 +64,8 @@ async function createPolicy(minAmount = '0'): Promise<string> {
       minAmount,
       steps: {
         create: [
-          { stepNumber: 1, roleId: managerRoleId, excludeInitiator: true },
-          { stepNumber: 2, roleId: controllerRoleId, excludeInitiator: true },
+          { tenantId, stepNumber: 1, roleId: managerRoleId, excludeInitiator: true },
+          { tenantId, stepNumber: 2, roleId: controllerRoleId, excludeInitiator: true },
         ],
       },
     },
@@ -204,9 +204,9 @@ describe.skipIf(databaseUrl === undefined || databaseUrl === '')('approval workf
           minAmount: '1000',
           steps: {
             create: [
-              { stepNumber: 1, roleId: managerRoleId },
-              { stepNumber: 2, roleId: controllerRoleId },
-              { stepNumber: 3, roleId: managerRoleId },
+              { tenantId, stepNumber: 1, roleId: managerRoleId },
+              { tenantId, stepNumber: 2, roleId: controllerRoleId },
+              { tenantId, stepNumber: 3, roleId: managerRoleId },
             ],
           },
         },
