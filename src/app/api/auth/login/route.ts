@@ -87,7 +87,7 @@ export async function POST(request: Request): Promise<NextResponse> {
   // `tenants` carries no `tenantId` and therefore no policy, so this read works
   // with nothing bound — which is exactly why it can be the thing that resolves
   // the binding for everything after it.
-  const tenant = await resolveTenant(tenantCode);
+  const tenant = await resolveTenant(tenantCode, username);
 
   if (tenant === 'ambiguous') {
     // Not a credential failure: the caller omitted a parameter this deployment
@@ -287,6 +287,7 @@ async function completeSignIn(attempt: SignInAttempt): Promise<NextResponse> {
  */
 async function resolveTenant(
   tenantCode: string | undefined,
+  username: string,
 ): Promise<{ id: string } | null | 'ambiguous'> {
   if (tenantCode !== undefined) {
     return prisma.tenant.findFirst({
@@ -304,7 +305,38 @@ async function resolveTenant(
   });
 
   if (candidates.length === 1) return candidates[0] ?? null;
-  return candidates.length === 0 ? null : 'ambiguous';
+  if (candidates.length === 0) return null;
+
+  // More than one tenant, and no code given. Rather than refuse, resolve from the username —
+  // `(tenantId, username)` is unique, so a name that exists in exactly one tenant identifies
+  // it without ambiguity.
+  //
+  // This was added because refusing was wrong in practice, not in theory: running the
+  // integration suite leaves dozens of scratch tenants in a development database, and from
+  // then on every sign-in demanded a tenant code nobody had a reason to know. The demand was
+  // technically correct and useless.
+  //
+  // It gives away nothing a password guess would not: the response for "username exists in
+  // two tenants" is the same 422 as before, and for a name that exists in none it falls
+  // through to the 401 that an unknown tenant code already produced.
+  //
+  // One limitation, stated because it is invisible otherwise: this reads `users` with no
+  // tenant bound. That works as the table owner, which is what the demo connects as. Under
+  // `erp_web` the fail-closed policy returns no rows and the fallback yields `'ambiguous'` —
+  // so a multi-tenant production deployment on the non-owner role still requires a tenant
+  // code, exactly as it did before. The failure direction is the safe one: it asks for more
+  // information rather than picking a tenant.
+  const matches = await prisma.user.findMany({
+    where: { username, isActive: true, tenant: { isActive: true } },
+    select: { tenantId: true },
+    take: 2,
+  });
+
+  if (matches.length === 1 && matches[0] !== undefined) {
+    return { id: matches[0].tenantId };
+  }
+
+  return 'ambiguous';
 }
 
 /**

@@ -86,6 +86,9 @@ const TARGET = {
 } as const;
 
 const FUNCTIONAL_CURRENCY = 'SAR';
+/** Trivially simple on purpose — see the note where it is hashed. */
+const DEMO_PASSWORD = '1234';
+
 const FISCAL_YEAR = 2026;
 const PERIOD_START = new Date(Date.UTC(2026, 0, 2));
 const PERIOD_END = new Date(Date.UTC(2026, 6, 25));
@@ -419,11 +422,15 @@ async function createUsersAndRoles(
   // A single well-known password for the demo dataset. It is hashed with the
   // production cost factor, and the seed prints it — a demo credential that is
   // secret is a demo credential nobody can use.
-  const passwordHash = await hashPassword('Erp@Demo2026!');
+  // Deliberately trivial. This generator builds a demonstration dataset that is shown to
+  // people in a room, and a password nobody can type from memory is friction with no benefit
+  // — there is nothing here to protect. The *policy* that governs real password changes is
+  // untouched: `validatePassword` would still refuse this, and `hashPassword` only hashes.
+  const passwordHash = await hashPassword(DEMO_PASSWORD);
 
   const userTemplates = [
     { username: 'admin', nameAr: 'مدير النظام', nameEn: 'System Administrator', role: 'SYSTEM_ADMINISTRATOR', isSuperAdmin: true },
-    { username: 'controller', nameAr: 'سعود المالكي', nameEn: 'Saud Almalki', role: 'FINANCIAL_CONTROLLER', isSuperAdmin: false },
+    { username: 'admin-2', nameAr: 'سعود المالكي', nameEn: 'Saud Almalki', role: 'FINANCIAL_CONTROLLER', isSuperAdmin: false },
     { username: 'accountant', nameAr: 'نورة العتيبي', nameEn: 'Noura Alotaibi', role: 'ACCOUNTANT', isSuperAdmin: false },
     { username: 'sales', nameAr: 'خالد الحربي', nameEn: 'Khalid Alharbi', role: 'SALES_REPRESENTATIVE', isSuperAdmin: false },
     { username: 'warehouse', nameAr: 'ماجد الغامدي', nameEn: 'Majed Alghamdi', role: 'WAREHOUSE_KEEPER', isSuperAdmin: false },
@@ -1881,11 +1888,10 @@ async function verify(tenantId: string): Promise<{ passed: boolean; lines: strin
   check('Inventory movements', movements >= TARGET.inventoryMovements * 0.9, `${movements} / ${TARGET.inventoryMovements}`);
   check('ZATCA e-invoices generated', zatca === salesInvoices, `${zatca} for ${salesInvoices} sales invoices`);
   check('Audit trail populated', auditRows > 0, `${auditRows} entries`);
-
   lines.push('');
   lines.push('  Sign in at /login with any of:');
-  lines.push('    admin / controller / accountant / sales / warehouse / cashier / hr / auditor');
-  lines.push('    password: Erp@Demo2026!');
+  lines.push('    admin / admin-2 / accountant / sales / warehouse / cashier / hr / auditor');
+  lines.push(`    password: ${DEMO_PASSWORD}`);
 
   return { passed, lines };
 }

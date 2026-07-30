@@ -312,14 +312,32 @@ export async function setTenantContext(tx: TransactionClient, tenantId: string):
  * made, rather than after the deployment switches to `erp_app` and every screen
  * empties at once.
  */
+/**
+ * Warns, once per call site, that a query ran with no tenant bound.
+ *
+ * Off unless `ERP_WARN_UNSCOPED=1`. It used to be on for the whole of development, and the
+ * signal drowned in its own noise: sign-in legitimately reads `tenants` before any scope
+ * exists, the seed runs entirely unscoped by design, and every one of those printed a warning
+ * that looked like a fault. A warning that fires constantly during normal operation trains
+ * people to ignore it, which is worse than not having it.
+ *
+ * The real protection was never this line — it is the fail-closed policy, which returns no
+ * rows rather than the wrong ones. This is a debugging aid, so it is opt-in and deduplicated.
+ */
+const warnedOperations = new Set<string>();
+
 function warnIfUnscoped(operation: string, tenantId: string | undefined): void {
-  if (tenantId === undefined && process.env.NODE_ENV === 'development') {
-    // eslint-disable-next-line no-console
-    console.warn(
-      `[prisma] ${operation} ran with no tenant scope. Row-level security will ` +
-        `reject every row once the application connects as erp_app.`,
-    );
-  }
+  if (tenantId !== undefined) return;
+  if (process.env['ERP_WARN_UNSCOPED'] !== '1') return;
+  if (warnedOperations.has(operation)) return;
+
+  warnedOperations.add(operation);
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[prisma] ${operation} ran with no tenant scope. Row-level security will ` +
+      `reject every row once the application connects as erp_app. ` +
+      `(further warnings for ${operation} suppressed)`,
+  );
 }
 
 /**

@@ -32,10 +32,15 @@ npm run dev                 # http://localhost:3000
 npm run outbox:worker       # without this, asynchronous subscribers never fire
 ```
 
-Sign in with any of `admin`, `controller`, `accountant`, `sales`, `warehouse`,
-`cashier`, `hr`, `auditor` — password `Erp@Demo2026!`. The roles differ
-meaningfully: `sales` can raise an invoice but not post it, `auditor` can read
-everything and change nothing.
+Sign in with any of `admin`, `admin-2`, `accountant`, `sales`, `warehouse`,
+`cashier`, `hr`, `auditor` — password `1234`, and the tenant code can be left
+blank. The roles differ meaningfully: `sales` can raise an invoice but not post
+it, `auditor` can read everything and change nothing.
+
+> These are demonstration credentials, chosen to be trivial to type during a
+> walkthrough. `1234` is not a password — it is a placeholder that happens to
+> satisfy the login form. Change `DEMO_PASSWORD` in `prisma/seed.ts` before this
+> database is reachable by anyone you did not invite.
 
 ```bash
 npm test           # 549 tests (344 unit + 205 integration)
@@ -236,7 +241,19 @@ only the application change that put every read path inside a tenant scope. See
 | **Stock transfers** | `/inventory/transfers` | Entry and register together; no journal, because the value never leaves |
 | **Stock adjustments** | `/inventory/adjustments` | Signed quantity; movement and its gain/loss journal in one transaction |
 | **Physical count** | `/inventory/counts` | Register and sheet; expected quantities frozen at open, variances posted as adjustments |
+| **Categories** | `/inventory/categories` | Reference table with a usage count; deactivate, never delete |
+| **Brands** | `/inventory/brands` | As above; the English name is the key, there is no separate code |
+| **Units of measure** | `/inventory/units` | As above, plus the conversion factor to the base unit |
+| **Cost centres** | `/finance/cost-centers` | As above, counted by the journal lines tagged with each |
 | Sign-in | `/login` | |
+
+The last four are one component parameterised four ways (`ReferenceTable` over
+`master-data-service`), because they are the same shape and four copies would be four places
+for the duplicate-code refusal to drift. **None of them offers a delete.** Each is referenced
+by rows that outlive it and every foreign key is `ON DELETE RESTRICT`, so a delete button
+would fail on exactly the records old enough to matter and succeed only on ones nobody would
+miss. The usage column is what makes deactivating the honest operation instead of a
+consolation prize.
 
 The sidebar is an accordion of five modules, each split into **التهيئة / العمليات / التقارير**
 — the division every large ERP settles on, because it maps to who uses a screen and how often.
@@ -411,14 +428,24 @@ Stated plainly rather than discovered later:
   dashboard, the sales register and invoice entry, the journal entry screen, the trial
   balance, the approval inbox, the stock card, bank reconciliation, the depreciation
   run, the journal and voucher registers, voucher entry, the product catalogue and card,
-  stock balances, the customer and supplier registers and cards, and sign-in. Purchase
-  documents, payroll and the remaining master-data maintenance screens are still API-only
-  and appear in the sidebar as *قريباً* rather than as links.
+  stock balances, the customer and supplier registers and cards, the four reference tables
+  (categories, brands, units, cost centres), and sign-in. Purchase invoice *entry*, payroll,
+  currencies and exchange rates, sales orders and quotations, the fiscal calendar and period
+  close are still API-only or unbuilt, and appear in the sidebar as *قريباً* rather than as
+  links.
 - **A physical count posts through the adjustment path, not around it.** Finalising a sheet
   calls the same `applyAdjustment` the manual adjustment screen calls, inside one transaction.
   All-or-nothing: a sheet that posted forty of fifty variances and then hit a negative-stock
   refusal would leave a completed count whose adjustments are partial, and re-running it would
   double the forty that landed.
+- **A count posts the variance, not the counted figure.** The sheet freezes the expected
+  quantity at open, and finalising applies `counted − expected` as a *delta* to whatever the
+  balance is at that moment. If stock legitimately moved while counting was in progress — a
+  transfer went out that afternoon — the delta preserves that movement, where writing the
+  counted figure in absolutely would silently erase it. The cost of that choice is the mirror
+  case: a counter who worked from a shelf that had already been picked reports a shortage that
+  is really a transfer. Freezing the warehouse for the duration is the operational answer, and
+  this system does not enforce it — there is no count lock.
 - **An uncounted count line is not a zero.** A blank line means nobody reached it; a typed `0`
   means the shelf was empty, which is usually the most important finding on the sheet. They are
   stored, submitted and displayed differently, and finalisation skips the blanks — treating
