@@ -566,7 +566,39 @@ Ordered by what a real deployment would need next:
     stops a mouse click while leaving middle-click, keyboard focus and the screen-reader link
     list all pointing at a dead URL. The renderer has no branch that produces an anchor
     without a page behind it.
-11. Partition maintenance job calling `erp_ensure_year_partition` ahead of time.
+11. ~~Stock transfers and adjustments, the chart of accounts and the general ledger.~~ Done.
+
+    `transferStock`, `receiveStock` and `issueStock` had been tested since the first commit
+    with nothing but the seed calling them. `stock-operations-service.ts` is the seam, and it
+    adds exactly one thing they do not do: the journal an adjustment needs.
+
+    A transfer posts no journal and an adjustment does, which is worth stating because the
+    asymmetry looks like an omission. Both warehouses sit in the same inventory GL account, so
+    a transfer's entry would be `Dr Inventory / Cr Inventory` — a journal that says nothing.
+    An adjustment is different in kind: stock appears or disappears, the value has changed, and
+    the counter-entry is a gain or a loss. Writing the movement without it would leave
+    inventory on the balance sheet disagreeing with the sum of its movements, which
+    `erp_stock_value_consistency` makes impossible — so it would fail late and confusingly
+    rather than be quietly wrong. Movement and journal share one transaction for the same
+    reason.
+
+    The adjustment quantity is a single signed string rather than a magnitude plus a direction
+    flag. Two fields that must agree are two fields that can disagree, and the one that would
+    win is whichever the service happened to read.
+
+    The general ledger computes its running balance with a window function rather than a loop.
+    Accumulating in TypeScript would either go through `number` — reintroducing floating point
+    on the one column a reader scans for a discrepancy — or pay a `Decimal` allocation per row
+    to reach the same answer more slowly. The window's ordering matches the query's, or the
+    running balance would belong to a different sequence of rows than the one displayed.
+12. Physical stock count. Deliberately not built with the rest: it is the only screen in this
+    round with no service behind it, and the reason is that it needs its own persistence. A
+    count sheet must freeze the expected quantity at the moment counting begins — comparing a
+    count against a balance that moved while people were counting produces variances that are
+    arithmetic artefacts, and a warehouse manager cannot tell those from real losses. That is a
+    migration with two tables and their RLS policies, which migration 009's deploy assertion
+    now requires, and it deserves its own change rather than being appended to a UI commit.
+13. Partition maintenance job calling `erp_ensure_year_partition` ahead of time.
    Deliberately last: migration 2 pre-creates yearly partitions through 2032 and
    every parent has a DEFAULT partition, so an out-of-range insert is slower rather
    than rejected. This is an optimisation with a 2032 deadline, not a latent outage.

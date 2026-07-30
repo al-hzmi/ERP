@@ -225,6 +225,10 @@ only the application change that put every read path inside a tenant scope. See
 | **Users** | `/system/users` | Roles, lockout state and failed attempts; read-only by design |
 | **Roles & permissions** | `/system/roles` | The matrix rendered from the same constants authorisation checks against |
 | **Branches & warehouses** | `/org/branches` | Warehouses nested under their branch, default marked |
+| **Chart of accounts** | `/finance/accounts` | Tree ordered by materialised path; postable accounts link to their ledger |
+| **General ledger** | `/finance/general-ledger` | One account over a period, opening balance and a running balance computed in SQL |
+| **Stock transfers** | `/inventory/transfers` | Entry and register together; no journal, because the value never leaves |
+| **Stock adjustments** | `/inventory/adjustments` | Signed quantity; movement and its gain/loss journal in one transaction |
 | Sign-in | `/login` | |
 
 The sidebar is an accordion of five modules, each split into **التهيئة / العمليات / التقارير**
@@ -401,8 +405,14 @@ Stated plainly rather than discovered later:
   balance, the approval inbox, the stock card, bank reconciliation, the depreciation
   run, the journal and voucher registers, voucher entry, the product catalogue and card,
   stock balances, the customer and supplier registers and cards, and sign-in. Purchase
-  documents, payroll, GRC and the remaining master-data maintenance screens are still
-  API-only and appear in the sidebar as *قريباً* rather than as links.
+  documents, payroll and the remaining master-data maintenance screens are still API-only
+  and appear in the sidebar as *قريباً* rather than as links.
+- **Physical stock count has no screen and no tables yet.** Unlike everything else shipped so
+  far, it has no service to put a screen on: a count needs its own persistence — a sheet, its
+  lines, and the expected quantity frozen at the moment counting began — because comparing a
+  count against a balance that moved while people were counting produces variances that are
+  arithmetic artefacts. That is a migration with its own RLS policies (migration 009's deploy
+  assertion refuses a new table without one), not a page.
 - **Some detail pages still do not exist, and nothing pretends they do.** Product,
   customer and supplier cards now exist and global search links to them again. Invoice,
   account and employee detail screens do not: those identifiers render as plain text and a

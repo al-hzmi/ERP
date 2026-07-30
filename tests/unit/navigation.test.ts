@@ -57,16 +57,20 @@ describe('the navigation tree', () => {
     const pages = [
       '/',
       '/approvals',
+      '/finance/accounts',
       '/finance/ageing',
       '/finance/balance-sheet',
       '/finance/depreciation',
+      '/finance/general-ledger',
       '/finance/income-statement',
       '/finance/journals',
       '/finance/journals/new',
       '/finance/trial-balance',
+      '/inventory/adjustments',
       '/inventory/products',
       '/inventory/stock',
       '/inventory/stock-card',
+      '/inventory/transfers',
       '/inventory/valuation',
       '/org/branches',
       '/procurement/invoices',
@@ -176,6 +180,7 @@ describe('every link the application can emit', () => {
     { prefix: '/sales/customers', page: 'sales/customers/[id]' },
     { prefix: '/procurement/suppliers', page: 'procurement/suppliers/[id]' },
     { prefix: '/sales/invoices', page: 'sales/invoices' },
+    { prefix: '/finance/general-ledger', page: 'finance/general-ledger' },
   ];
 
   it('points search results only at pages that exist', () => {
@@ -200,7 +205,9 @@ describe('every link the application can emit', () => {
     // The route families that used to be emitted and no longer exist anywhere.
     // Still unbuilt. `/sales/customers/`, `/procurement/suppliers/` and `/inventory/products/`
     // left this list when their detail pages shipped.
-    for (const dead of ['/finance/accounts/', '/hr/employees/', '/procurement/invoices/']) {
+    // `/finance/accounts/` left this list when account hits started landing on the general
+    // ledger instead — a report that exists beats a detail page that does not.
+    for (const dead of ['/hr/employees/', '/procurement/invoices/']) {
       expect(source, `search-service still emits ${dead}`).not.toContain(`\`${dead}`);
     }
   });

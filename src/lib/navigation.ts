@@ -125,7 +125,12 @@ export const NAVIGATION: readonly NavModule[] = [
       {
         kind: 'setup',
         items: [
-          { labelAr: 'شجرة الحسابات', labelEn: 'Chart of Accounts', icon: ListTree },
+          {
+            href: '/finance/accounts',
+            labelAr: 'شجرة الحسابات',
+            labelEn: 'Chart of Accounts',
+            icon: ListTree,
+          },
           { labelAr: 'السنوات والفترات المالية', labelEn: 'Fiscal Calendar', icon: CalendarClock },
           { labelAr: 'مراكز التكلفة والمشاريع', labelEn: 'Cost Centres & Projects', icon: Split },
           { labelAr: 'العملات وأسعار الصرف', labelEn: 'Currencies & FX Rates', icon: Coins },
@@ -195,7 +200,12 @@ export const NAVIGATION: readonly NavModule[] = [
             labelEn: 'Income Statement',
             icon: FileSpreadsheet,
           },
-          { labelAr: 'دفتر الأستاذ العام', labelEn: 'General Ledger', icon: ScrollText },
+          {
+            href: '/finance/general-ledger',
+            labelAr: 'دفتر الأستاذ العام',
+            labelEn: 'General Ledger',
+            icon: ScrollText,
+          },
           { href: '/finance/ageing', labelAr: 'أعمار الذمم', labelEn: 'Ageing Analysis', icon: Activity },
         ],
       },
@@ -225,8 +235,18 @@ export const NAVIGATION: readonly NavModule[] = [
             labelEn: 'Stock Card',
             icon: ScrollText,
           },
-          { labelAr: 'التحويلات المخزنية', labelEn: 'Stock Transfers', icon: ArrowLeftRight },
-          { labelAr: 'تسويات المخزون', labelEn: 'Stock Adjustments', icon: PackageSearch },
+          {
+            href: '/inventory/transfers',
+            labelAr: 'التحويلات المخزنية',
+            labelEn: 'Stock Transfers',
+            icon: ArrowLeftRight,
+          },
+          {
+            href: '/inventory/adjustments',
+            labelAr: 'تسويات المخزون',
+            labelEn: 'Stock Adjustments',
+            icon: PackageSearch,
+          },
           { labelAr: 'الجرد الفعلي', labelEn: 'Physical Count', icon: ClipboardCheck },
           { labelAr: 'أوامر التجميع', labelEn: 'Assembly Orders', icon: Truck },
         ],

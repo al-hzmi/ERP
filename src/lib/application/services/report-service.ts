@@ -579,6 +579,177 @@ export async function getDashboardMetrics(
 // ─────────────────────────────────────────────────────────────────────────────
 //  Helpers
 // ─────────────────────────────────────────────────────────────────────────────
+//  General ledger
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface GeneralLedgerLine {
+  readonly journalId: string;
+  readonly entryNumber: string;
+  readonly journalType: string;
+  readonly date: string;
+  readonly descriptionAr: string;
+  readonly lineDescription: string | null;
+  readonly counterpartyName: string | null;
+  readonly debit: string;
+  readonly credit: string;
+  /** The account's balance in its natural direction after this line. */
+  readonly runningBalance: string;
+}
+
+export interface GeneralLedger {
+  readonly account: {
+    id: string;
+    code: string;
+    nameAr: string;
+    nameEn: string;
+    type: string;
+    nature: string;
+  };
+  readonly openingBalance: string;
+  readonly lines: readonly GeneralLedgerLine[];
+  readonly periodDebit: string;
+  readonly periodCredit: string;
+  readonly closingBalance: string;
+  /** True when `lines` was cut short, so the screen can say so rather than mislead. */
+  readonly truncated: boolean;
+}
+
+const GENERAL_LEDGER_LIMIT = 1000;
+
+/**
+ * Every posting to one account over a period, with a running balance.
+ *
+ * This is the report an accountant reaches for when the trial balance shows a figure they did
+ * not expect: it is the only view that answers "which entries made this number".
+ *
+ * ## The running balance is computed in SQL
+ *
+ * `SUM(...) OVER (ORDER BY ...)` rather than a loop in TypeScript. Two reasons, and the second
+ * is the one that matters: a window function keeps the arithmetic in `numeric` for the whole
+ * column, where accumulating in JavaScript would either go through `number` — reintroducing
+ * floating point on the one column a reader scans for a discrepancy — or pay a `Decimal`
+ * allocation per row for a thousand rows to reach the same answer more slowly.
+ *
+ * The window's ordering must match the query's, or the running balance belongs to a different
+ * sequence of rows than the one displayed. Both are `(date, entryNumber, lineNumber)`.
+ *
+ * ## The opening balance is a separate query, not the first row
+ *
+ * Everything posted *before* the period, in the account's natural direction. Deriving it by
+ * fetching from the beginning of time and slicing would transfer a year of rows to display a
+ * month of them.
+ *
+ * ## Only POSTED journals
+ *
+ * A draft is not in the ledger. Including it would produce a running balance that no other
+ * report agrees with, and the disagreement would be blamed on this screen.
+ */
+export async function getGeneralLedger(
+  period: ReportPeriod & { accountId: string },
+): Promise<GeneralLedger | null> {
+  const account = await prisma.account.findFirst({
+    where: { id: period.accountId, tenantId: period.tenantId },
+    select: { id: true, code: true, nameAr: true, nameEn: true, type: true, nature: true },
+  });
+
+  if (account === null) return null;
+
+  const natural = account.nature === 'DEBIT';
+
+  const openingRows = await prisma.$queryRaw<{ amount: string }[]>`
+    SELECT COALESCE(
+             CASE WHEN ${natural}
+                  THEN SUM(l."debit")  - SUM(l."credit")
+                  ELSE SUM(l."credit") - SUM(l."debit")
+             END, 0)::text AS amount
+      FROM "journal_lines" l
+      JOIN "journals" j ON j."id" = l."journalId" AND j."date" = l."journalDate"
+     WHERE l."tenantId" = ${period.tenantId}::uuid
+       AND l."accountId" = ${period.accountId}::uuid
+       AND j."status" = 'POSTED'
+       AND j."date" < ${period.fromDate}::date
+       AND (${period.branchId ?? null}::uuid IS NULL OR j."branchId" = ${period.branchId ?? null}::uuid)
+  `;
+
+  const opening = openingRows[0]?.amount ?? '0';
+
+  const rows = await prisma.$queryRaw<
+    {
+      journalId: string;
+      entryNumber: string;
+      journalType: string;
+      date: Date;
+      descriptionAr: string;
+      lineDescription: string | null;
+      counterpartyName: string | null;
+      debit: string;
+      credit: string;
+      runningBalance: string;
+    }[]
+  >`
+    SELECT j."id"            AS "journalId",
+           j."entryNumber",
+           j."type"::text    AS "journalType",
+           j."date",
+           j."descriptionAr",
+           l."description"   AS "lineDescription",
+           c."nameAr"        AS "counterpartyName",
+           l."debit"::text   AS "debit",
+           l."credit"::text  AS "credit",
+           (${opening}::numeric +
+            SUM(CASE WHEN ${natural} THEN l."debit" - l."credit"
+                     ELSE l."credit" - l."debit" END)
+              OVER (ORDER BY j."date", j."entryNumber", l."lineNumber"
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+           )::text AS "runningBalance"
+      FROM "journal_lines" l
+      JOIN "journals" j ON j."id" = l."journalId" AND j."date" = l."journalDate"
+      LEFT JOIN "counterparties" c ON c."id" = l."counterpartyId"
+     WHERE l."tenantId" = ${period.tenantId}::uuid
+       AND l."accountId" = ${period.accountId}::uuid
+       AND j."status" = 'POSTED'
+       AND j."date" BETWEEN ${period.fromDate}::date AND ${period.toDate}::date
+       AND (${period.branchId ?? null}::uuid IS NULL OR j."branchId" = ${period.branchId ?? null}::uuid)
+     ORDER BY j."date", j."entryNumber", l."lineNumber"
+     LIMIT ${GENERAL_LEDGER_LIMIT + 1}
+  `;
+
+  const truncated = rows.length > GENERAL_LEDGER_LIMIT;
+  const visible = truncated ? rows.slice(0, GENERAL_LEDGER_LIMIT) : rows;
+
+  const periodDebit = sumStrings(visible.map((row) => row.debit), period.currency);
+  const periodCredit = sumStrings(visible.map((row) => row.credit), period.currency);
+  const openingMoney = Money.of(opening, period.currency);
+
+  const movement = natural
+    ? periodDebit.subtract(periodCredit)
+    : periodCredit.subtract(periodDebit);
+
+  return {
+    account,
+    openingBalance: openingMoney.toFixed(4),
+    lines: visible.map((row) => ({
+      journalId: row.journalId,
+      entryNumber: row.entryNumber,
+      journalType: row.journalType,
+      date: row.date.toISOString().slice(0, 10),
+      descriptionAr: row.descriptionAr,
+      lineDescription: row.lineDescription,
+      counterpartyName: row.counterpartyName,
+      debit: row.debit,
+      credit: row.credit,
+      runningBalance: row.runningBalance,
+    })),
+    periodDebit: periodDebit.toFixed(4),
+    periodCredit: periodCredit.toFixed(4),
+    // Computed from the totals rather than read off the last row, so a truncated page still
+    // reports the closing balance of what it actually showed.
+    closingBalance: openingMoney.add(movement).toFixed(4),
+    truncated,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 function sumStrings(values: readonly string[], currency: string): Money {
   return values.reduce<Money>(

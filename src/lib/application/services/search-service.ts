@@ -283,9 +283,9 @@ async function searchAccounts(
     titleEn: row.nameEn,
     subtitle: row.balance,
     score: row.score,
-    // The chart of accounts is a planned screen; the trial balance is a report, not an
-    // account view. No destination until one is built.
-    href: null,
+    // The general ledger is the account view: a hit lands on that account's own ledger,
+    // which is what someone searching an account code almost always wants.
+    href: `/finance/general-ledger?account=${row.id}`,
   }));
 }
 
