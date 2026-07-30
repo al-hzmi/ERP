@@ -22,7 +22,7 @@ cp .env.example .env        # then set AUTH_SECRET and ENCRYPTION_KEY
 #    openssl rand -hex 32      -> ENCRYPTION_KEY
 
 # 3. Database (PostgreSQL 15+)
-npm run db:migrate          # applies all six migrations
+npm run db:migrate          # applies all seven migrations
 npm run db:seed             # generates and verifies a full demo company
 
 # 4. Run
@@ -38,7 +38,7 @@ meaningfully: `sales` can raise an invoice but not post it, `auditor` can read
 everything and change nothing.
 
 ```bash
-npm test           # 375 tests (269 unit + 106 integration)
+npm test           # 435 tests (299 unit + 136 integration)
 npm run typecheck  # strict TypeScript, no `any`, no `@ts-ignore`
 npm run build      # production build
 ```
@@ -109,18 +109,18 @@ src/
 └── styles/
 prisma/
 ├── schema.prisma             7 bounded contexts
-├── migrations/               6 migrations (see below)
+├── migrations/               7 migrations (see below)
 └── seed.ts + seed/           the data generator
 tests/
-├── unit/                     269 tests, no database required
-└── integration/              106 tests against real PostgreSQL
+├── unit/                     299 tests, no database required
+└── integration/              136 tests against real PostgreSQL
 ```
 
 Dependencies point inward. `domain/` imports nothing from `application/` or
 `infrastructure/`, which is why the entire accounting behaviour of the system is
 testable without a database.
 
-### The six migrations
+### The seven migrations
 
 1. **`20260101000000_init`** — the schema Prisma generates.
 2. **`20260101000001_partitioning_constraints_triggers`** — everything Prisma
@@ -141,6 +141,8 @@ testable without a database.
 6. **`20260731000000_request_idempotency`** — the first outcome of each client-keyed
    mutation, so the offline queue can replay a submission whose response was lost
    without creating a second invoice.
+7. **`20260801000000_bank_reconciliation_guards`** — the constraints `bank_statement_lines`
+   never had, and the partial unique index that stops one payment being reconciled twice.
 
 Migration 4 installed the policies; making them *apply* took no further migration,
 only the application change that put every read path inside a tenant scope. See
@@ -173,6 +175,7 @@ only the application change that put every read path inside a tenant scope. See
 | The scope seam for pages | `api/page.ts` | What `apiHandler` is to a route: redirect, then bind the tenant, in one place a server component cannot forget |
 | Idempotent replay | `api/idempotency.ts` | The first outcome of a keyed mutation, returned verbatim for repeats — and refused outright when a key is reused with a different body, because that would answer with the wrong document's number |
 | The offline queue | `offline/queue.ts` | Oldest first, stop at the first undelivered submission, and one key per submission reused on every attempt: the three rules that keep a retry from becoming a second invoice |
+| Bank matching | `domain/treasury/bank-matching.ts` | Amount, direction and account are absolute — a 50-halala difference is a bank charge, not a 99% match — and the automatic pass declines anything ambiguous rather than tossing a coin |
 
 ---
 
@@ -187,6 +190,7 @@ only the application change that put every read path inside a tenant scope. See
 | Trial balance | `/finance/trial-balance` | Balanced/unbalanced answered at a glance |
 | **Approval inbox** | `/approvals` | Only what is waiting on you, by the role its current step names |
 | **Stock card** | `/inventory/stock-card` | One product in one warehouse, movement by movement, running balance |
+| **Bank reconciliation** | `/treasury/reconciliation` | Statement lines against payment vouchers, with the difference answered at a glance |
 | Sign-in | `/login` | |
 
 Two conventions the entry screens share. Saving creates a **draft**; posting is a

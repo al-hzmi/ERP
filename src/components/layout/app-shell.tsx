@@ -6,6 +6,7 @@ import {
   ArrowLeftRight,
   Banknote,
   BookPlus,
+  Landmark,
   Boxes,
   ClipboardCheck,
   FilePlus2,
@@ -91,6 +92,7 @@ const NAVIGATION: readonly NavSection[] = [
       { href: '/finance/journals/new', labelAr: 'قيد جديد', labelEn: 'New Journal Entry', icon: BookPlus },
       { href: '/finance/trial-balance', labelAr: 'ميزان المراجعة', labelEn: 'Trial Balance', icon: Scale },
       { href: '/treasury/payments', labelAr: 'سندات القبض والصرف', labelEn: 'Payment Vouchers', icon: Banknote },
+      { href: '/treasury/reconciliation', labelAr: 'التسوية البنكية', labelEn: 'Bank Reconciliation', icon: Landmark },
     ],
   },
   {
