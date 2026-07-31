@@ -34,7 +34,13 @@ export type ConditionField =
   | 'SUBTOTAL'
   | 'TAX_AMOUNT'
   | 'LINE_COUNT'
-  | 'MAX_LINE_DISCOUNT_PERCENT';
+  | 'MAX_LINE_DISCOUNT_PERCENT'
+  // Counterparty facts (migration 014). The credit-hold integration: "block a sales order for
+  // a customer more than 60 days overdue" is not a fact about the order, so these are computed
+  // from the customer's open receivables and folded into the same fact bag.
+  | 'OVERDUE_DAYS'
+  | 'OVERDUE_AMOUNT'
+  | 'CREDIT_EXPOSURE_PERCENT';
 
 export type ConditionOperator = 'GT' | 'GTE' | 'LT' | 'LTE' | 'EQ' | 'NEQ';
 
@@ -63,6 +69,11 @@ export interface DocumentFacts {
   readonly TAX_AMOUNT: string;
   readonly LINE_COUNT: string;
   readonly MAX_LINE_DISCOUNT_PERCENT: string;
+  /** Age of the customer's oldest overdue invoice, after grace. */
+  readonly OVERDUE_DAYS: string;
+  readonly OVERDUE_AMOUNT: string;
+  /** Outstanding as a percentage of the credit limit. `0` when there is no limit. */
+  readonly CREDIT_EXPOSURE_PERCENT: string;
 }
 
 export interface EvaluableRule {
@@ -211,6 +222,9 @@ export const FIELD_LABELS_AR: Record<ConditionField, string> = {
   TAX_AMOUNT: 'قيمة الضريبة',
   LINE_COUNT: 'عدد السطور',
   MAX_LINE_DISCOUNT_PERCENT: 'أعلى نسبة خصم في سطر',
+  OVERDUE_DAYS: 'أقدم متأخرات العميل (يوم)',
+  OVERDUE_AMOUNT: 'إجمالي متأخرات العميل',
+  CREDIT_EXPOSURE_PERCENT: 'نسبة الانكشاف من الحد الائتماني',
 };
 
 export const OPERATOR_LABELS_AR: Record<ConditionOperator, string> = {
@@ -223,15 +237,19 @@ export const OPERATOR_LABELS_AR: Record<ConditionOperator, string> = {
 };
 
 /** `LINE_COUNT` is a count; everything else is money except the percentage. */
-export function fieldUnit(field: ConditionField): 'money' | 'percent' | 'count' {
+export function fieldUnit(field: ConditionField): 'money' | 'percent' | 'count' | 'days' {
   if (field === 'LINE_COUNT') return 'count';
-  if (field === 'MAX_LINE_DISCOUNT_PERCENT') return 'percent';
+  if (field === 'OVERDUE_DAYS') return 'days';
+  if (field === 'MAX_LINE_DISCOUNT_PERCENT' || field === 'CREDIT_EXPOSURE_PERCENT') {
+    return 'percent';
+  }
   return 'money';
 }
 
 /** One clause as a sentence, for the rule list and the approvals inbox. */
 export function describeCondition(condition: RuleCondition): string {
   const unit = fieldUnit(condition.field);
-  const suffix = unit === 'percent' ? '%' : unit === 'count' ? ' سطر' : '';
+  const suffix =
+    unit === 'percent' ? '%' : unit === 'count' ? ' سطر' : unit === 'days' ? ' يوم' : '';
   return `${FIELD_LABELS_AR[condition.field]} ${OPERATOR_LABELS_AR[condition.operator]} ${condition.value}${suffix}`;
 }

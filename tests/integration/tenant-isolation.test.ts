@@ -105,6 +105,9 @@ const TENANT_SCOPED_TABLES = [
   // tenant and migration 009's generic guard trigger — same arrangement as every other child
   // table in the schema.
   'approval_rule_conditions',
+  // Added by migration 014. A child of `counterparties`, so it carries the denormalised tenant
+  // and migration 009's generic guard trigger.
+  'customer_credit_profiles',
 ] as const;
 
 interface PolicyRow {

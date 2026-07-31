@@ -106,6 +106,7 @@ model Tenant {
   assemblyOrders        AssemblyOrder[]
   assemblyOrderLines    AssemblyOrderLine[]
   ApprovalRuleCondition ApprovalRuleCondition[]
+  CustomerCreditProfile CustomerCreditProfile[]
 
   @@index([isActive])
   @@map("tenants")
@@ -869,11 +870,12 @@ model Counterparty {
   createdAt      DateTime          @default(now()) @db.Timestamptz(6)
   updatedAt      DateTime          @updatedAt @db.Timestamptz(6)
 
-  tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  documents      Document[]
-  payments       Payment[]
-  journalLines   JournalLine[]
-  tradeDocuments TradeDocument[]
+  tenant                Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  documents             Document[]
+  payments              Payment[]
+  journalLines          JournalLine[]
+  tradeDocuments        TradeDocument[]
+  creditProfile         CustomerCreditProfile?
 
   @@unique([tenantId, code])
   @@index([tenantId, type, isActive])
@@ -1954,6 +1956,17 @@ enum ApprovalConditionField {
   LINE_COUNT
   /// The largest per-line discount on the document, as a percentage.
   MAX_LINE_DISCOUNT_PERCENT
+  // ── Counterparty facts (migration 014) ────────────────────────────────────
+  // Credit control asks about the *customer*, not the document: "block a sales order for a
+  // customer more than 60 days overdue" is not a fact about the order. Added to this enum
+  // rather than a parallel one so a single rule can mix both — "total over 50,000 AND overdue
+  // over 60 days" is one rule, evaluated once.
+  /// Age in days of the customer's oldest unpaid invoice, past its grace period.
+  OVERDUE_DAYS
+  /// Total outstanding on invoices past due beyond the grace period.
+  OVERDUE_AMOUNT
+  /// Outstanding balance as a percentage of the credit limit. Uncapped — 300% is real.
+  CREDIT_EXPOSURE_PERCENT
 }
 
 enum ApprovalConditionOperator {
@@ -1963,4 +1976,37 @@ enum ApprovalConditionOperator {
   LTE
   EQ
   NEQ
+}
+
+/// Collections policy for one customer.
+///
+/// **Deliberately does not carry a `creditLimit`.** `counterparties.creditLimit` already exists
+/// and is what the ageing report, the customer card and the field-level permission set read.
+/// A second column for the same concept means every screen has to pick one, and they disagree
+/// the first time somebody updates either — silently. The profile holds the *terms*; the limit
+/// stays where the rest of the system already looks.
+model CustomerCreditProfile {
+  id             String   @id @default(uuid()) @db.Uuid
+  tenantId       String   @db.Uuid
+  counterpartyId String   @unique @db.Uuid
+  /// Days after the due date before an invoice counts as delinquent. Distinct from
+  /// `PaymentTerm.netDays`, which decides when it becomes *due* — one is negotiated with the
+  /// customer, the other is set by whoever owns collections.
+  graceDays      Int      @default(0)
+  /// The age at which the system stops letting new orders through unreviewed.
+  holdAfterDays  Int      @default(60)
+  /// A manual override that outranks the arithmetic: a customer in dispute is blocked whatever
+  /// the numbers say. The CHECK requires a reason, so a block is always liftable by someone
+  /// who can see why it exists.
+  isBlocked      Boolean  @default(false)
+  blockReason    String?  @db.VarChar(512)
+  notes          String?  @db.VarChar(1024)
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime @default(now()) @db.Timestamptz(6)
+
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  counterparty Counterparty @relation(fields: [counterpartyId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([tenantId])
+  @@map("customer_credit_profiles")
 }

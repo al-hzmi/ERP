@@ -25,6 +25,11 @@ function facts(overrides: Partial<DocumentFacts> = {}): DocumentFacts {
     TAX_AMOUNT: '1000',
     LINE_COUNT: '3',
     MAX_LINE_DISCOUNT_PERCENT: '0',
+    // The counterparty facts migration 014 added. Zeroed by default so the existing document
+    // cases read unchanged; the credit ones set them explicitly.
+    OVERDUE_DAYS: '0',
+    OVERDUE_AMOUNT: '0',
+    CREDIT_EXPOSURE_PERCENT: '0',
     ...overrides,
   };
 }

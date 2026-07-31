@@ -22,7 +22,7 @@ cp .env.example .env        # then set AUTH_SECRET and ENCRYPTION_KEY
 #    openssl rand -hex 32      -> ENCRYPTION_KEY
 
 # 3. Database (PostgreSQL 15+)
-npm run db:migrate          # applies all thirteen migrations
+npm run db:migrate          # applies all fifteen migrations
 npm run db:seed             # generates and verifies a full demo company
 
 # 4. Run
@@ -43,7 +43,7 @@ it, `auditor` can read everything and change nothing.
 > database is reachable by anyone you did not invite.
 
 ```bash
-npm test           # 653 tests (385 unit + 268 integration)
+npm test           # 691 tests (404 unit + 287 integration)
 npm run typecheck  # strict TypeScript, no `any`, no `@ts-ignore`
 npm run build      # production build
 ```
@@ -114,18 +114,18 @@ src/
 └── styles/
 prisma/
 ├── schema.prisma             7 bounded contexts
-├── migrations/               13 migrations (see below)
+├── migrations/               15 migrations (see below)
 └── seed.ts + seed/           the data generator
 tests/
-├── unit/                     385 tests, no database required
-└── integration/              268 tests against real PostgreSQL
+├── unit/                     404 tests, no database required
+└── integration/              287 tests against real PostgreSQL
 ```
 
 Dependencies point inward. `domain/` imports nothing from `application/` or
 `infrastructure/`, which is why the entire accounting behaviour of the system is
 testable without a database.
 
-### The thirteen migrations
+### The fifteen migrations
 
 1. **`20260101000000_init`** — the schema Prisma generates.
 2. **`20260101000001_partitioning_constraints_triggers`** — everything Prisma
@@ -189,6 +189,14 @@ testable without a database.
    SERIALIZABLE decision path, the inbox — is written against a policy id. A second table
    would have needed its own copy of all of it, and the two would drift on the only question
    that matters: which one decides.
+14. **`20260808000000_customer_credit_profiles`** — the collections policy per customer (grace
+   days, hold threshold, manual block) and the three counterparty facts a credit rule asks
+   about. It deliberately does **not** add a second `creditLimit`: that column already exists
+   on `counterparties` and a duplicate would let the two disagree silently.
+15. **`20260808000001_credit_condition_constraints`** — the CHECK that references migration
+   14's new enum values. Its own file because PostgreSQL refuses to reference a new enum value
+   from the transaction that added it, and Prisma wraps each migration in one. Migration 13's
+   header warned about this; migration 14 hit it anyway on first deploy.
 
 Migration 4 installed the policies; making them *apply* took no further migration,
 only the application change that put every read path inside a tenant scope. See
@@ -293,6 +301,46 @@ by rows that outlive it and every foreign key is `ON DELETE RESTRICT`, so a dele
 would fail on exactly the records old enough to matter and succeed only on ones nobody would
 miss. The usage column is what makes deactivating the honest operation instead of a
 consolation prize.
+
+### Collections and credit control
+
+**Most of what a dunning engine needs was already here**: `documents.dueDate` since migration
+1, `counterparties.creditLimit` since migration 1 (field-protected), and `getAgingReport`
+bucketing into 0-30 / 31-60 / 61-90 / 90+ in SQL. What did not exist was the *policy* — how
+long the company waits before it stops selling — and the wiring into the approval engine.
+
+`/finance/collections` leads with the **overdue** figure, not the total. Total receivable
+includes money working as intended, and leading with it makes a healthy book look like a
+crisis. The buckets read oldest-first, because the column anybody acts on should not be at the
+far end of four columns of good news.
+
+**The credit hold is a rule, not a hard-coded check.** Migration 14 adds `OVERDUE_DAYS`,
+`OVERDUE_AMOUNT` and `CREDIT_EXPOSURE_PERCENT` to the *existing* condition set, so "block a
+sales order for a customer more than 60 days overdue, released only by the CFO" is written in
+the rules builder like any other rule — and can be combined with document facts in one clause
+("over 50,000 **and** more than 60 days overdue").
+
+"Overdue" is defined twice: in SQL for the dashboard (a report over 400 accounts must not ship
+every invoice to Node) and in `domain/collections/aging.ts` for the credit gate (that answer
+stops a sale and must be exact line by line). Both apply `asOf − dueDate − graceDays`, and
+`tests/integration/collections.test.ts` runs them over the same data and asserts they agree
+bucket for bucket. A dashboard saying a customer is 70 days late while the gate lets their
+order through is worse than no dashboard.
+
+Everything sums in `bigint` at scale 4. Ten thousand items of 0.10 total exactly 1000.0000 —
+`Number` addition gives 999.9999999999147, which is enough to put a customer either side of a
+credit limit for reasons nobody can reproduce.
+
+Grace is deducted from the *age*, not allowed as a bucket: an invoice due 40 days ago on 10
+days' grace is 30 days overdue, and bucketing the raw 40 then "allowing" the first bucket
+agrees only when grace happens to be 30.
+
+The statement of account's closing balance and its ageing total are the same number by two
+routes — a running `bigint` balance over invoices and receipts, and a sum of open items. They
+sit side by side on the sheet a customer receives, and one fils between them ends the
+conversation. One coupling is named in the service: the credit column comes from `payments`
+rows while the ageing sums `documents.paidAmount`, and they agree only because `recordPayment`
+writes both in one transaction.
 
 ### The approval engine
 

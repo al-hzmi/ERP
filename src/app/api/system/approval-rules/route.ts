@@ -31,6 +31,10 @@ const schema = z.discriminatedUnion('action', [
             'TAX_AMOUNT',
             'LINE_COUNT',
             'MAX_LINE_DISCOUNT_PERCENT',
+            // Counterparty facts (migration 014) — the credit-hold integration.
+            'OVERDUE_DAYS',
+            'OVERDUE_AMOUNT',
+            'CREDIT_EXPOSURE_PERCENT',
           ]),
           operator: z.enum(['GT', 'GTE', 'LT', 'LTE', 'EQ', 'NEQ']),
           value: z.string().trim(),

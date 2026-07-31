@@ -48,6 +48,12 @@ const FIELDS: ConditionField[] = [
   'TAX_AMOUNT',
   'LINE_COUNT',
   'MAX_LINE_DISCOUNT_PERCENT',
+  // Counterparty facts (migration 014). These are what make a credit hold expressible:
+  // "block a sales order for a customer more than 60 days overdue" is not a fact about the
+  // order, so it could not be written at all before these existed.
+  'OVERDUE_DAYS',
+  'OVERDUE_AMOUNT',
+  'CREDIT_EXPOSURE_PERCENT',
 ];
 
 const OPERATORS: ConditionOperator[] = ['GT', 'GTE', 'LT', 'LTE', 'EQ', 'NEQ'];
@@ -260,7 +266,9 @@ export function RulesBuilder({
                       ? '%'
                       : fieldUnit(condition.field) === 'count'
                         ? 'سطر'
-                        : 'ريال'}
+                        : fieldUnit(condition.field) === 'days'
+                          ? 'يوم'
+                          : 'ريال'}
                   </span>
                   <Button
                     variant="ghost"

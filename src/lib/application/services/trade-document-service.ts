@@ -8,6 +8,7 @@ import { withTenantRead, withTransaction } from '@/lib/infrastructure/db/prisma'
 import { allocateDocumentNumber } from './numbering-service';
 import { evaluateApprovalGate } from './approval-rules-service';
 import type { DocumentFacts } from '@/lib/domain/approvals/rule-evaluator';
+import { getCreditFacts } from './collections-service';
 
 /**
  * Quotations, sales orders, purchase orders and sales returns.
@@ -515,6 +516,8 @@ export async function setTradeDocumentStatus(input: {
         status: true,
         documentNumber: true,
         type: true,
+        counterpartyId: true,
+        documentDate: true,
         subtotal: true,
         taxAmount: true,
         totalAmount: true,
@@ -577,12 +580,24 @@ export async function setTradeDocumentStatus(input: {
     let held: { requestId: string; ruleNameAr: string; totalSteps: number } | null = null;
 
     if (input.status === 'CONFIRMED' && document.status === 'DRAFT') {
+      // The customer's credit position, read inside this transaction so a payment landing
+      // between the read and the write cannot change whether the order was held.
+      //
+      // Computed for every confirm rather than only when a credit rule exists: knowing whether
+      // to skip it would mean inspecting the rules first, and the query is one indexed read
+      // against `documents_open_receivable_idx`.
+      const credit = await getCreditFacts(tx, {
+        tenantId: input.tenantId,
+        counterpartyId: document.counterpartyId,
+        asOf: document.documentDate,
+      });
+
       const gate = await evaluateApprovalGate(tx, {
         tenantId: input.tenantId,
         entityType: 'TRADE_DOCUMENT',
         entityId: document.id,
         documentType: document.type,
-        facts: documentFacts(document),
+        facts: { ...documentFacts(document), ...credit.facts },
         requestedById: input.userId,
       });
 
@@ -659,5 +674,11 @@ function documentFacts(document: {
     TAX_AMOUNT: document.taxAmount.toString(),
     LINE_COUNT: String(document.lines.length),
     MAX_LINE_DISCOUNT_PERCENT: maxDiscount.toString(),
+    // The counterparty half is merged in by the caller, which is where the transaction and
+    // the customer id are. Zeroed here so the shape is complete either way — a missing key
+    // would make a credit rule silently unevaluable rather than simply not fire.
+    OVERDUE_DAYS: '0',
+    OVERDUE_AMOUNT: '0',
+    CREDIT_EXPOSURE_PERCENT: '0',
   };
 }
