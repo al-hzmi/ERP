@@ -773,3 +773,433 @@ function stripType(row: {
     amount: row.amount,
   };
 }
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Inventory movement analysis
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface MovementAnalysisRow {
+  readonly productId: string;
+  readonly sku: string;
+  readonly nameAr: string;
+  readonly categoryNameAr: string | null;
+  readonly quantityIn: string;
+  readonly quantityOut: string;
+  readonly netQuantity: string;
+  readonly valueIn: string;
+  readonly valueOut: string;
+  readonly movementCount: number;
+}
+
+/**
+ * What moved in and out over a period, by product.
+ *
+ * ## Direction comes from `balanceAfter`, not from `type`
+ *
+ * The obvious implementation classifies `MovementType` into inbound and outbound. It is wrong
+ * here, and quietly: `ADJUSTMENT` is written for *both* directions — `applyAdjustment` posts a
+ * shortage and a surplus under the same type — and `TRANSFER` is one type covering both legs of
+ * a move. A `CASE` on `type` therefore has to guess on exactly the movements a stock report
+ * exists to explain, and its totals would not reconcile with the stock card.
+ *
+ * `quantity` is documented as always positive, with direction carried by `type`. But
+ * `balanceAfter` is the running on-hand balance, so the *signed* delta of any movement is
+ * `balanceAfter - balanceAfter of the previous movement for the same product and warehouse`.
+ * That is exact for every type, including the two ambiguous ones.
+ *
+ * ## The window orders by `movementNumber`, and that detail is load-bearing
+ *
+ * "Previous movement" is only meaningful under the order the balances were actually written
+ * in. Ordering by `(movementDate, createdAt, id)` looks right and is not: `createdAt` defaults
+ * to `now()`, which in PostgreSQL is *transaction start* time, so every movement written by one
+ * transaction carries an identical timestamp and the random-uuid tiebreak shuffles them. Against
+ * the seed that put 131 of 392 positions out — the totals silently disagreed with the stock card
+ * on a third of the catalogue.
+ *
+ * `movementNumber` comes from `erp_next_document_number`, so it is monotonic in write order and
+ * zero-padded within a year, which makes its lexicographic order the true one. Summing the
+ * deltas per position under this ordering reproduces `stock_levels.quantityOnHand` exactly.
+ *
+ * ## Why the window runs over unfiltered movements
+ *
+ * The `LAG` is computed before the date filter is applied, in the inner query. Computing it
+ * after would make the first movement inside the window look like the product's first ever —
+ * its predecessor would be NULL — and attribute the entire opening balance to the period as an
+ * inbound movement. The filter belongs outside the window, and that is the whole reason this is
+ * two queries deep rather than one.
+ */
+export async function getMovementAnalysis(
+  period: ReportPeriod & { warehouseId?: string; limit?: number },
+): Promise<MovementAnalysisRow[]> {
+  const rows = await prisma.$queryRaw<
+    {
+      productId: string;
+      sku: string;
+      nameAr: string;
+      categoryNameAr: string | null;
+      quantityIn: string;
+      quantityOut: string;
+      netQuantity: string;
+      valueIn: string;
+      valueOut: string;
+      movementCount: bigint;
+    }[]
+  >`
+    WITH deltas AS (
+      SELECT m."productId",
+             m."movementDate",
+             m."unitCost",
+             -- The signed change this movement made to the on-hand balance. COALESCE handles
+             -- the product's first ever movement, whose predecessor balance is zero.
+             m."balanceAfter" - COALESCE(
+               LAG(m."balanceAfter") OVER (
+                 PARTITION BY m."productId", m."warehouseId"
+                 ORDER BY m."movementNumber"
+               ), 0
+             ) AS "delta"
+        FROM "inventory_movements" m
+       WHERE m."tenantId" = ${period.tenantId}::uuid
+         AND (${period.warehouseId ?? null}::uuid IS NULL
+              OR m."warehouseId" = ${period.warehouseId ?? null}::uuid)
+    )
+    SELECT p."id"       AS "productId",
+           p."sku",
+           p."nameAr",
+           cat."nameAr" AS "categoryNameAr",
+           COALESCE(SUM(CASE WHEN d."delta" > 0 THEN d."delta" ELSE 0 END), 0)::text  AS "quantityIn",
+           COALESCE(SUM(CASE WHEN d."delta" < 0 THEN -d."delta" ELSE 0 END), 0)::text AS "quantityOut",
+           COALESCE(SUM(d."delta"), 0)::text                                          AS "netQuantity",
+           COALESCE(SUM(CASE WHEN d."delta" > 0 THEN d."delta" * d."unitCost"
+                             ELSE 0 END), 0)::text                                    AS "valueIn",
+           COALESCE(SUM(CASE WHEN d."delta" < 0 THEN -d."delta" * d."unitCost"
+                             ELSE 0 END), 0)::text                                    AS "valueOut",
+           COUNT(*) AS "movementCount"
+      FROM deltas d
+      JOIN "products" p ON p."id" = d."productId"
+      LEFT JOIN "categories" cat ON cat."id" = p."categoryId"
+     -- Applied outside the window, so the LAG above saw the movement that really preceded
+     -- this one rather than the first one that happens to fall inside the period.
+     WHERE d."movementDate" >= ${period.fromDate}::date
+       AND d."movementDate" <= ${period.toDate}::date
+     GROUP BY p."id", p."sku", p."nameAr", cat."nameAr"
+     ORDER BY COUNT(*) DESC, p."sku"
+     LIMIT ${period.limit ?? 200}
+  `;
+
+  return rows.map((row) => ({
+    productId: row.productId,
+    sku: row.sku,
+    nameAr: row.nameAr,
+    categoryNameAr: row.categoryNameAr,
+    quantityIn: row.quantityIn,
+    quantityOut: row.quantityOut,
+    netQuantity: row.netQuantity,
+    valueIn: Money.of(row.valueIn, period.currency).toString(),
+    valueOut: Money.of(row.valueOut, period.currency).toString(),
+    movementCount: Number(row.movementCount),
+  }));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Slow-moving stock
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface SlowMovingRow {
+  readonly productId: string;
+  readonly sku: string;
+  readonly nameAr: string;
+  readonly categoryNameAr: string | null;
+  readonly quantityOnHand: string;
+  readonly stockValue: string;
+  /** `null` means never issued — which is the strongest finding, not a missing value. */
+  readonly lastIssueDate: string | null;
+  readonly daysSinceIssue: number | null;
+}
+
+/**
+ * Stock on hand that has not been issued for at least `thresholdDays`.
+ *
+ * ## Never issued and long-ago issued are both slow, and NULL is why this needs care
+ *
+ * A product holding stock with no issue history at all has never sold once — the strongest case
+ * on the report. A plain `WHERE last_issue < cutoff` drops exactly those rows, because NULL
+ * fails every comparison. The predicate tests for the NULL explicitly, and `daysSinceIssue`
+ * stays `null` rather than becoming a large number, so the screen can say "لم يُصرف مطلقاً"
+ * instead of implying a date it does not have.
+ *
+ * ## Only issues count as movement
+ *
+ * Receiving stock is not evidence that it sells. A product restocked last week and never issued
+ * is more of a problem, not less — so only outbound movements (`OUT`) reset the clock.
+ */
+export async function getSlowMovingStock(input: {
+  tenantId: string;
+  asOf: Date;
+  thresholdDays: number;
+  warehouseId?: string;
+  currency: string;
+  limit?: number;
+}): Promise<SlowMovingRow[]> {
+  const rows = await prisma.$queryRaw<
+    {
+      productId: string;
+      sku: string;
+      nameAr: string;
+      categoryNameAr: string | null;
+      quantityOnHand: string;
+      stockValue: string;
+      lastIssueDate: Date | null;
+      daysSinceIssue: number | null;
+    }[]
+  >`
+    WITH balances AS (
+      SELECT s."productId",
+             SUM(s."quantityOnHand") AS "quantityOnHand",
+             SUM(s."totalValue")     AS "stockValue"
+        FROM "stock_levels" s
+       WHERE s."tenantId" = ${input.tenantId}::uuid
+         AND (${input.warehouseId ?? null}::uuid IS NULL
+              OR s."warehouseId" = ${input.warehouseId ?? null}::uuid)
+       GROUP BY s."productId"
+      HAVING SUM(s."quantityOnHand") > 0
+    ),
+    last_issue AS (
+      SELECT m."productId", MAX(m."movementDate") AS "lastIssueDate"
+        FROM "inventory_movements" m
+       WHERE m."tenantId" = ${input.tenantId}::uuid
+         AND m."type" = 'OUT'
+         AND m."movementDate" <= ${input.asOf}::date
+         AND (${input.warehouseId ?? null}::uuid IS NULL
+              OR m."warehouseId" = ${input.warehouseId ?? null}::uuid)
+       GROUP BY m."productId"
+    )
+    SELECT p."id"       AS "productId",
+           p."sku",
+           p."nameAr",
+           cat."nameAr" AS "categoryNameAr",
+           b."quantityOnHand"::text,
+           b."stockValue"::text,
+           li."lastIssueDate",
+           CASE WHEN li."lastIssueDate" IS NULL THEN NULL
+                ELSE (${input.asOf}::date - li."lastIssueDate")::int
+           END AS "daysSinceIssue"
+      FROM balances b
+      JOIN "products" p ON p."id" = b."productId"
+      LEFT JOIN "categories" cat ON cat."id" = p."categoryId"
+      LEFT JOIN last_issue li ON li."productId" = b."productId"
+     -- The NULL branch is explicit and load-bearing: those are the never-sold products, and
+     -- a comparison alone would silently drop every one of them.
+     WHERE li."lastIssueDate" IS NULL
+        OR li."lastIssueDate" < (${input.asOf}::date - ${input.thresholdDays}::int)
+     ORDER BY b."stockValue" DESC
+     LIMIT ${input.limit ?? 200}
+  `;
+
+  return rows.map((row) => ({
+    productId: row.productId,
+    sku: row.sku,
+    nameAr: row.nameAr,
+    categoryNameAr: row.categoryNameAr,
+    quantityOnHand: row.quantityOnHand,
+    stockValue: Money.of(row.stockValue, input.currency).toString(),
+    lastIssueDate: row.lastIssueDate?.toISOString().slice(0, 10) ?? null,
+    daysSinceIssue: row.daysSinceIssue,
+  }));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Sales and purchase analysis
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface CounterpartySalesRow {
+  readonly counterpartyId: string;
+  readonly code: string;
+  readonly nameAr: string;
+  readonly invoiceCount: number;
+  readonly netSales: string;
+  readonly taxTotal: string;
+  readonly grossSales: string;
+}
+
+/**
+ * Sales by customer, or purchases by supplier — one query read from either side.
+ *
+ * ## Credit notes net off rather than appearing separately
+ *
+ * A credit note against a posted invoice reduces it. A customer with a million in invoices and
+ * nine hundred thousand in returns has bought a hundred thousand, and a report showing the
+ * first figure is worse than no report at all. So the note's amounts are subtracted.
+ *
+ * ## Drafts are excluded, and so are voids
+ *
+ * A draft invoice is a proposal and a void one was cancelled. Neither is a sale. This matches
+ * every other report in this file, which is the point — a figure here has to agree with the
+ * income statement or one of them is lying.
+ */
+export async function getSalesByCounterparty(
+  period: ReportPeriod & { direction: 'SALES' | 'PURCHASES'; limit?: number },
+): Promise<CounterpartySalesRow[]> {
+  const invoiceType = period.direction === 'SALES' ? 'SALES_INVOICE' : 'PURCHASE_INVOICE';
+  const creditType = period.direction === 'SALES' ? 'SALES_CREDIT_NOTE' : 'PURCHASE_DEBIT_NOTE';
+
+  const rows = await prisma.$queryRaw<
+    {
+      counterpartyId: string;
+      code: string;
+      nameAr: string;
+      invoiceCount: bigint;
+      netSales: string;
+      taxTotal: string;
+      grossSales: string;
+    }[]
+  >`
+    SELECT c."id"     AS "counterpartyId",
+           c."code",
+           c."nameAr",
+           COUNT(*) FILTER (WHERE d."type"::text = ${invoiceType}) AS "invoiceCount",
+           COALESCE(SUM(CASE WHEN d."type"::text = ${invoiceType}
+                             THEN d."subtotal" - d."discountTotal"
+                             ELSE -(d."subtotal" - d."discountTotal") END), 0)::text AS "netSales",
+           COALESCE(SUM(CASE WHEN d."type"::text = ${invoiceType}
+                             THEN d."taxTotal" ELSE -d."taxTotal" END), 0)::text     AS "taxTotal",
+           COALESCE(SUM(CASE WHEN d."type"::text = ${invoiceType}
+                             THEN d."total" ELSE -d."total" END), 0)::text           AS "grossSales"
+      FROM "documents" d
+      JOIN "counterparties" c ON c."id" = d."counterpartyId"
+     WHERE d."tenantId" = ${period.tenantId}::uuid
+       AND d."type"::text IN (${invoiceType}, ${creditType})
+       AND d."status"::text NOT IN ('DRAFT', 'PENDING_APPROVAL', 'VOID')
+       AND d."issueDate" >= ${period.fromDate}::date
+       AND d."issueDate" <= ${period.toDate}::date
+       AND (${period.branchId ?? null}::uuid IS NULL
+            OR d."branchId" = ${period.branchId ?? null}::uuid)
+     GROUP BY c."id", c."code", c."nameAr"
+     ORDER BY 7 DESC
+     LIMIT ${period.limit ?? 100}
+  `;
+
+  return rows.map((row) => ({
+    counterpartyId: row.counterpartyId,
+    code: row.code,
+    nameAr: row.nameAr,
+    invoiceCount: Number(row.invoiceCount),
+    netSales: Money.of(row.netSales, period.currency).toString(),
+    taxTotal: Money.of(row.taxTotal, period.currency).toString(),
+    grossSales: Money.of(row.grossSales, period.currency).toString(),
+  }));
+}
+
+export interface ProductSalesRow {
+  readonly productId: string;
+  readonly sku: string;
+  readonly nameAr: string;
+  readonly categoryNameAr: string | null;
+  readonly quantitySold: string;
+  readonly netSales: string;
+  /** What the sold goods actually cost, from the movements — not the product's standard cost. */
+  readonly cost: string;
+  readonly margin: string;
+  /** `null`, never `'0'`, when nothing sold. See the note on the function. */
+  readonly marginPercent: string | null;
+}
+
+/**
+ * Sales by product, with the margin on each. Also serves the profit-margin screen.
+ *
+ * ## The cost is what was consumed, not `products.costPrice`
+ *
+ * `costPrice` is a standard cost — a planning figure that is whatever somebody last typed into
+ * the product form. The cost of what actually sold is on the inventory movements the invoice
+ * generated, valued at the cost layers consumed at the time. Using the standard cost would give
+ * a margin that changes retroactively every time that field is edited, including for periods
+ * already reported on.
+ *
+ * ## A margin percentage on zero sales is undefined, not zero
+ *
+ * `null` says so. Returning `0` would sort a product that sold nothing next to one that sold at
+ * exactly cost, and those are opposite findings. `getIncomeStatement` applies the same rule.
+ *
+ * ## Cost is protected data
+ *
+ * This returns cost and margin; the caller checks the `costPrice` field grant and drops the
+ * columns without it. Same arrangement as `getInventoryValuation`.
+ */
+export async function getSalesByProduct(
+  period: ReportPeriod & { limit?: number },
+): Promise<ProductSalesRow[]> {
+  const rows = await prisma.$queryRaw<
+    {
+      productId: string;
+      sku: string;
+      nameAr: string;
+      categoryNameAr: string | null;
+      quantitySold: string;
+      netSales: string;
+      cost: string;
+    }[]
+  >`
+    WITH sold AS (
+      SELECT dl."productId",
+             SUM(CASE WHEN d."type"::text = 'SALES_INVOICE' THEN dl."quantity"
+                      ELSE -dl."quantity" END)  AS "quantitySold",
+             SUM(CASE WHEN d."type"::text = 'SALES_INVOICE' THEN dl."lineTotal"
+                      ELSE -dl."lineTotal" END) AS "netSales"
+        FROM "document_lines" dl
+        JOIN "documents" d ON d."id" = dl."documentId"
+       WHERE d."tenantId" = ${period.tenantId}::uuid
+         AND d."type"::text IN ('SALES_INVOICE', 'SALES_CREDIT_NOTE')
+         AND d."status"::text NOT IN ('DRAFT', 'PENDING_APPROVAL', 'VOID')
+         AND d."issueDate" >= ${period.fromDate}::date
+         AND d."issueDate" <= ${period.toDate}::date
+         AND (${period.branchId ?? null}::uuid IS NULL
+              OR d."branchId" = ${period.branchId ?? null}::uuid)
+       GROUP BY dl."productId"
+    ),
+    -- What the goods cost, from the movements: an OUT is an issue, a RETURN came back.
+    costs AS (
+      SELECT m."productId",
+             SUM(CASE WHEN m."type" = 'OUT' THEN m."totalCost"
+                      ELSE -m."totalCost" END) AS "cost"
+        FROM "inventory_movements" m
+       WHERE m."tenantId" = ${period.tenantId}::uuid
+         AND m."type" IN ('OUT', 'RETURN')
+         AND m."movementDate" >= ${period.fromDate}::date
+         AND m."movementDate" <= ${period.toDate}::date
+       GROUP BY m."productId"
+    )
+    SELECT p."id"       AS "productId",
+           p."sku",
+           p."nameAr",
+           cat."nameAr" AS "categoryNameAr",
+           s."quantitySold"::text,
+           s."netSales"::text,
+           COALESCE(co."cost", 0)::text AS "cost"
+      FROM sold s
+      JOIN "products" p ON p."id" = s."productId"
+      LEFT JOIN "categories" cat ON cat."id" = p."categoryId"
+      LEFT JOIN costs co ON co."productId" = s."productId"
+     ORDER BY s."netSales" DESC
+     LIMIT ${period.limit ?? 200}
+  `;
+
+  return rows.map((row) => {
+    const net = Money.of(row.netSales, period.currency);
+    const cost = Money.of(row.cost, period.currency);
+    const margin = net.subtract(cost);
+
+    return {
+      productId: row.productId,
+      sku: row.sku,
+      nameAr: row.nameAr,
+      categoryNameAr: row.categoryNameAr,
+      quantitySold: row.quantitySold,
+      netSales: net.toString(),
+      cost: cost.toString(),
+      margin: margin.toString(),
+      marginPercent: net.isZero
+        ? null
+        : ((Number(margin.toString()) / Number(net.toString())) * 100).toFixed(2),
+    };
+  });
+}

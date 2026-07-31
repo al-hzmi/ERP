@@ -16,6 +16,7 @@ import { transferStock } from '@/lib/application/services/inventory-service';
 import { PermissionSet } from '@/lib/infrastructure/auth/rbac';
 import type { RequestContext } from '@/lib/infrastructure/auth/request-context';
 import { withTransaction } from '@/lib/infrastructure/db/prisma';
+import { eventBus } from '@/lib/infrastructure/events/event-bus';
 
 /**
  * Integration tests against a real PostgreSQL instance.
@@ -161,6 +162,42 @@ describe('posted ledger immutability', () => {
                 '2026-03-15', 98, ${accountId('1')}::uuid, 100, 0)
       `,
     ).rejects.toThrow(/summary account|ERP06/i);
+  });
+
+  it('enqueues each journal event exactly once, and re-enqueuing is rejected', async () => {
+    // The regression this exists for: `persistJournalEntry` enqueues its own events before
+    // returning them, and `/api/finance/journals` enqueued the returned array a second time.
+    // The outbox primary key is the event id, so the second insert aborted the transaction —
+    // every manual journal entry through that endpoint failed with a 500, while the seed,
+    // which calls `persistJournalEntry` directly, worked. Nothing caught it because the
+    // screen was only ever checked for rendering.
+    const posted = await withTransaction(async (tx) => {
+      const draft = new JournalEntryDraft(journalProps('outbox once'));
+      draft.debit(accountId('1-1-01-001'), Money.of('40.00', 'SAR'));
+      draft.credit(accountId('4-1-01-001'), Money.of('40.00', 'SAR'));
+
+      return persistJournalEntry(tx, unwrap(draft.validate()), {
+        audit: auditContext(),
+        createdById: fixture.userId,
+      });
+    });
+
+    expect(posted.ok).toBe(true);
+    if (!posted.ok) return;
+
+    // One row per event, already written by `persistJournalEntry`.
+    expect(posted.value.events.length).toBeGreaterThan(0);
+    for (const event of posted.value.events) {
+      expect(await prisma.outboxEvent.count({ where: { id: event.eventId } })).toBe(1);
+    }
+
+    // And a caller that treats the returned array as work still to be done is refused rather
+    // than silently double-publishing to every subscriber.
+    await expect(
+      withTransaction(async (tx) => {
+        await eventBus.enqueue(tx, posted.value.events);
+      }),
+    ).rejects.toThrow();
   });
 
   it('keeps account balances in step with what was posted', async () => {

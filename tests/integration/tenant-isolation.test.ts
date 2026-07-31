@@ -91,6 +91,16 @@ const TENANT_SCOPED_TABLES = [
   // migration to fix them, which is what that assertion is for.
   'stock_counts',
   'stock_count_lines',
+  // Added by migration 011. Two of them — `payment_terms` and `price_lists` — are tenant-rooted
+  // and carry no guard trigger, because there is no parent whose tenant theirs could disagree
+  // with. The other five are children and do, using migration 009's generic guard.
+  'payment_terms',
+  'price_lists',
+  'price_list_lines',
+  'trade_documents',
+  'trade_document_lines',
+  'assembly_orders',
+  'assembly_order_lines',
 ] as const;
 
 interface PolicyRow {

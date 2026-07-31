@@ -160,6 +160,11 @@ export async function persistJournalEntry(
     },
   );
 
+  // Enqueued here, inside the caller's transaction, so an entry that rolls back takes its
+  // events with it. **Callers must not enqueue the returned `events` again** — the outbox
+  // primary key is the event id, so a second insert fails the whole transaction. They are
+  // returned for inspection, not as work still to be done. The journals route did exactly
+  // that and every manual entry through it failed with a 500.
   await eventBus.enqueue(tx, events);
 
   return ok({

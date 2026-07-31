@@ -22,7 +22,7 @@ cp .env.example .env        # then set AUTH_SECRET and ENCRYPTION_KEY
 #    openssl rand -hex 32      -> ENCRYPTION_KEY
 
 # 3. Database (PostgreSQL 15+)
-npm run db:migrate          # applies all ten migrations
+npm run db:migrate          # applies all eleven migrations
 npm run db:seed             # generates and verifies a full demo company
 
 # 4. Run
@@ -43,7 +43,7 @@ it, `auditor` can read everything and change nothing.
 > database is reachable by anyone you did not invite.
 
 ```bash
-npm test           # 549 tests (344 unit + 205 integration)
+npm test           # 584 tests (344 unit + 240 integration)
 npm run typecheck  # strict TypeScript, no `any`, no `@ts-ignore`
 npm run build      # production build
 ```
@@ -114,18 +114,18 @@ src/
 └── styles/
 prisma/
 ├── schema.prisma             7 bounded contexts
-├── migrations/               10 migrations (see below)
+├── migrations/               11 migrations (see below)
 └── seed.ts + seed/           the data generator
 tests/
 ├── unit/                     344 tests, no database required
-└── integration/              205 tests against real PostgreSQL
+└── integration/              240 tests against real PostgreSQL
 ```
 
 Dependencies point inward. `domain/` imports nothing from `application/` or
 `infrastructure/`, which is why the entire accounting behaviour of the system is
 testable without a database.
 
-### The ten migrations
+### The eleven migrations
 
 1. **`20260101000000_init`** — the schema Prisma generates.
 2. **`20260101000001_partitioning_constraints_triggers`** — everything Prisma
@@ -167,6 +167,15 @@ testable without a database.
    `unitCostAtOpen` are frozen at open by a trigger, not by convention: a variance measured
    against a balance that moved during counting is an arithmetic artefact, and freezing has to
    be a property of the database for that to hold.
+11. **`20260805000000_trade_documents_price_lists_assembly`** — the commercial paperwork:
+   quotations, sales and purchase orders and sales returns in one `trade_documents` table,
+   plus price lists, payment terms and assembly orders. They live *apart* from `documents`
+   on purpose. That table carries the ZATCA hash chain, the posting trigger and the
+   paid/allocated invariants, and every row in it is expected to become a journal; adding
+   `QUOTATION` to `DocumentType` would put rows there that must never post, and each of
+   those invariants would then need an "unless it is a quotation" clause. A confirmed
+   document's lines are frozen by trigger, and an assembly order cannot list its own output
+   as a component.
 
 Migration 4 installed the policies; making them *apply* took no further migration,
 only the application change that put every read path inside a tenant scope. See
@@ -245,6 +254,23 @@ only the application change that put every read path inside a tenant scope. See
 | **Brands** | `/inventory/brands` | As above; the English name is the key, there is no separate code |
 | **Units of measure** | `/inventory/units` | As above, plus the conversion factor to the base unit |
 | **Cost centres** | `/finance/cost-centers` | As above, counted by the journal lines tagged with each |
+| **Fiscal calendar** | `/finance/fiscal-years` | Years and their twelve periods; closing one actually blocks posting |
+| **Period close** | `/finance/period-close` | The same board, reached from العمليات — periods close in order |
+| **Currencies & FX** | `/finance/currencies` | One functional currency, enforced; rates are dated facts, never overwritten |
+| **Posting rules** | `/finance/posting-rules` | Which account each transaction type posts to; missing required keys headline the screen |
+| **Quotations** | `/sales/quotations` | Entry and register |
+| **Sales orders** | `/sales/orders` | As above |
+| **Sales returns** | `/sales/returns` | As above |
+| **Purchase orders** | `/procurement/orders` | As above, the supplier side |
+| **Price lists** | `/sales/price-lists` | Catalogues with validity windows and quantity tiers |
+| **Payment terms** | `/sales/payment-terms` | Net days and early-settlement discounts |
+| **Assembly orders** | `/inventory/assemblies` | What to build from what; component shortfalls visible before it starts |
+| **Movement analysis** | `/inventory/movement-analysis` | In and out per product, signed from the running balance |
+| **Slow-moving stock** | `/inventory/slow-moving` | Stock sitting still; never-issued products included, not dropped |
+| **Sales by customer** | `/sales/analysis-by-customer` | Credit notes net off |
+| **Purchases by supplier** | `/procurement/analysis-by-supplier` | The same query, the other side |
+| **Sales by product** | `/sales/analysis-by-product` | Cost and margin columns dropped without the `costPrice` grant |
+| **Profit margins** | `/sales/margins` | Worst first; the whole screen is behind the `costPrice` grant |
 | Sign-in | `/login` | |
 
 The last four are one component parameterised four ways (`ReferenceTable` over
@@ -423,21 +449,52 @@ Stated plainly rather than discovered later:
   calling `requestApproval` on its way through: making an invoice unpostable until
   approved changes when documents can post, which is a policy decision rather than a
   UI one. The seam is one function call.
-- **Not every module has a screen.** The domain, application and API layers cover
-  sales, procurement, inventory, treasury, financials and HR. The UI ships the
-  dashboard, the sales register and invoice entry, the journal entry screen, the trial
-  balance, the approval inbox, the stock card, bank reconciliation, the depreciation
-  run, the journal and voucher registers, voucher entry, the product catalogue and card,
-  stock balances, the customer and supplier registers and cards, the four reference tables
-  (categories, brands, units, cost centres), and sign-in. Purchase invoice *entry*, payroll,
-  currencies and exchange rates, sales orders and quotations, the fiscal calendar and period
-  close are still API-only or unbuilt, and appear in the sidebar as *قريباً* rather than as
-  links.
+- **Finance, inventory and sales/procurement now have a screen for every sidebar entry;
+  System & GRC does not.** All 51 navigable routes are built and return 200 — the screens
+  table above lists them. What is still *قريباً*, all of it under إدارة النظام والأمان:
+  approval policies, tax settings, number sequences, VAT returns, the VAT report,
+  segregation-of-duties, and sign-in history. Those entries carry no `href` at all rather
+  than a disabled link, so there is no way to reach a 404 from the sidebar, and
+  `tests/unit/navigation.test.ts` asserts it.
+
+  Two things elsewhere remain API-only with no entry screen: purchase invoice *entry* (the
+  register at `/procurement/invoices` reads, `postPurchaseInvoice` writes) and payroll.
 - **A physical count posts through the adjustment path, not around it.** Finalising a sheet
   calls the same `applyAdjustment` the manual adjustment screen calls, inside one transaction.
   All-or-nothing: a sheet that posted forty of fifty variances and then hit a negative-stock
   refusal would leave a completed count whose adjustments are partial, and re-running it would
   double the forty that landed.
+- **The new commercial documents post nothing, by design.** Confirming a sales order reserves
+  no stock and raises no receivable; confirming a purchase order commits nothing to a supplier
+  account; recording a sales return issues no credit note. These are the paperwork that
+  surrounds an invoice, not accounting documents, and the conversion paths (quotation → order
+  → invoice) are not built. Two integration tests assert the boundary rather than trusting it:
+  confirming a document must not change the journal count, and completing an assembly order
+  must not change the movement count. If that ever changes, those tests are where it announces
+  itself.
+- **Price lists are not consulted at invoicing, and payment terms do not set due dates.** The
+  invoice screen still reads the product's `salePrice` and takes the due date as typed. Wiring
+  either one in is a small change in the invoice path and a large change in meaning — every
+  open invoice's ageing bucket would move the day it shipped — so both screens say so in a
+  banner rather than looking authoritative while doing nothing.
+- **Completing an assembly order does not consume its components or receive its output.**
+  Doing that correctly means costing the assembled item from its components' cost layers, and
+  a half-built version would corrupt the inventory valuation every other report rests on. The
+  order records intent and status.
+- **Movement analysis derives direction from `balanceAfter`, not from the movement type — and
+  the window's ordering is load-bearing.** `ADJUSTMENT` is written for both directions and
+  `TRANSFER` covers both legs, so a `CASE` on `type` guesses on exactly the movements the
+  report exists to explain. The signed delta comes from the running balance instead, ordered
+  by `movementNumber`. Ordering by `(movementDate, createdAt, id)` looks equivalent and is
+  not: `createdAt` defaults to `now()`, which PostgreSQL evaluates at *transaction start*, so
+  every movement written by one transaction shares a timestamp and the uuid tiebreak shuffles
+  them — which put 131 of the seed's 392 positions out before it was caught.
+- **`/api/finance/journals` double-published its events until this release.**
+  `persistJournalEntry` enqueues to the outbox itself and *also* returns the events; the route
+  enqueued the returned array again, the outbox primary key rejected the duplicate ids, and
+  every manual journal entry through the endpoint failed with a 500. The seed was unaffected
+  because it calls `persistJournalEntry` directly, so nothing noticed — the screen had only
+  ever been checked for rendering. Fixed, with a regression test in `database-guards`.
 - **A count posts the variance, not the counted figure.** The sheet freezes the expected
   quantity at open, and finalising applies `counted − expected` as a *delta* to whatever the
   balance is at that moment. If stock legitimately moved while counting was in progress — a

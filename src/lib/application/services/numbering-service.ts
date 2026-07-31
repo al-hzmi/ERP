@@ -23,7 +23,12 @@ export type SequenceKey =
   | 'INVENTORY_MOVEMENT'
   | 'STOCK_TRANSFER'
   | 'PAYROLL_RUN'
-  | 'FIXED_ASSET';
+  | 'FIXED_ASSET'
+  | 'QUOTATION'
+  | 'SALES_ORDER'
+  | 'PURCHASE_ORDER'
+  | 'SALES_RETURN'
+  | 'ASSEMBLY_ORDER';
 
 interface SeriesDefinition {
   readonly prefix: string;
@@ -43,6 +48,11 @@ const SERIES: Record<SequenceKey, SeriesDefinition> = {
   STOCK_TRANSFER: { prefix: 'TRF', padding: 5 },
   PAYROLL_RUN: { prefix: 'PR', padding: 4 },
   FIXED_ASSET: { prefix: 'FA', padding: 4 },
+  QUOTATION: { prefix: 'QT', padding: 5 },
+  SALES_ORDER: { prefix: 'SO', padding: 5 },
+  PURCHASE_ORDER: { prefix: 'PO', padding: 5 },
+  SALES_RETURN: { prefix: 'SR', padding: 5 },
+  ASSEMBLY_ORDER: { prefix: 'ASM', padding: 5 },
 };
 
 /**

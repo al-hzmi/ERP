@@ -8,7 +8,6 @@ import { err, ok } from '@/lib/domain/shared/result';
 import { DateOnly } from '@/lib/domain/shared/value-objects';
 import { persistJournalEntry } from '@/lib/application/services/journal-service';
 import { prisma, withTransaction, withTenantRead } from '@/lib/infrastructure/db/prisma';
-import { eventBus } from '@/lib/infrastructure/events/event-bus';
 
 /**
  * Manual journal entries.
@@ -214,9 +213,15 @@ export const POST = apiHandler(
 
       if (!posted.ok) return posted;
 
-      // Enqueued inside the transaction, so an entry that rolls back takes its
-      // events with it.
-      await eventBus.enqueue(tx, posted.value.events);
+      // No `eventBus.enqueue` here, and that is the fix for a bug this route shipped with:
+      // `persistJournalEntry` already enqueues, inside this same transaction, before it
+      // returns. Enqueuing the returned array again re-inserted rows with the same
+      // `eventId`, and the outbox primary key rejected every one of them — so *every*
+      // manual journal entry through this endpoint failed with an unhandled 500 while the
+      // seed, which calls `persistJournalEntry` directly, worked fine.
+      //
+      // The events are still returned because callers legitimately inspect them. They are
+      // not a to-do list.
 
       return ok({
         journalId: posted.value.journalId,
