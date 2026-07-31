@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import type { RawQueryClient } from '@/lib/infrastructure/db/prisma';
 import { prisma } from '@/lib/infrastructure/db/prisma';
+import { compactCode, normalizeSearchTerm, tokenize } from '@/lib/search/normalize';
 
 /**
  * Intelligent search.
@@ -17,6 +18,27 @@ import { prisma } from '@/lib/infrastructure/db/prisma';
  *
  * The score is computed in SQL so that ordering and LIMIT happen in the database
  * — fetching every candidate and sorting in Node would be correct and useless.
+ *
+ * ## Normalisation (migration 012)
+ *
+ * The three techniques above all compare raw text, which left four kinds of query returning
+ * nothing against the seeded company:
+ *
+ *   - `١٠٣٨` — Arabic-Indic digits. Self-inflicted: `formatQuantity` *prints* them, so the
+ *     application rendered codes its own search could not find.
+ *   - `BTC1038` — the separator is a house style nobody types back.
+ *   - `الصفوه` for `الصفوة`, `الافق` for `الأفق` — ordinary Arabic spelling variance.
+ *
+ * So every comparison now runs through `erp_normalize_search()` / `erp_compact_code()` on the
+ * column and `normalizeSearchTerm()` / `compactCode()` on the term. Migration 012 carries
+ * trigram expression indexes on exactly those expressions, so the normalised comparison is
+ * still index-served rather than a sequential scan.
+ *
+ * ## Multi-token
+ *
+ * `صفوة خدمات` finds `شركة الصفوة للخدمات`, which no single `ILIKE` can — the words are
+ * separated by text the user did not type. Every token must match *somewhere* in the row, so
+ * adding a word narrows the result, which is what a search box is expected to do.
  */
 
 export type SearchEntity =
@@ -118,28 +140,114 @@ async function searchEntity(
 }
 
 /**
- * The shared ranking expression.
+ * The shared ranking expression, computed on the normalised forms.
  *
- * Ordered by decreasing confidence: an exact code match is certainly what the
- * user meant; a prefix match almost certainly is; a substring match on the code
- * is what makes `1001` find `BTC-1001`; a name match is next; and trigram
- * similarity is the fallback that catches typos.
+ * Ordered by decreasing confidence: an exact code match is certainly what the user meant; a
+ * prefix match almost certainly is; a substring match on the code is what makes `1001` find
+ * `BTC-1001`; a name match is next; and trigram similarity is the fallback that catches typos.
+ *
+ * Both sides are folded — `erp_compact_code` on the column, `compactCode` on the term — so a
+ * user who typed `btc١٠٣٨` still scores the full 1.00 exact-match rung rather than dropping to
+ * a trigram guess.
  */
-function scoreExpression(codeColumn: Prisma.Sql, nameArColumn: Prisma.Sql, nameEnColumn: Prisma.Sql, term: string): Prisma.Sql {
+function scoreExpression(
+  codeColumn: Prisma.Sql,
+  nameArColumn: Prisma.Sql,
+  nameEnColumn: Prisma.Sql,
+  term: string,
+): Prisma.Sql {
+  const tokens = tokenize(term);
+  if (tokens.length === 0) return Prisma.sql`0::float8`;
+
+  // The whole query first. A row matching the entire string contiguously is a better answer
+  // than one that merely contains each word somewhere, so it keeps the undiluted ladder.
+  const whole = ladder(codeColumn, nameArColumn, nameEnColumn, term);
+  if (tokens.length === 1) return whole;
+
+  // Otherwise average the per-token ladders. Averaging rather than taking the best, because
+  // `صفوة خدمات` matching both words in one row should outrank a row that matches only one —
+  // GREATEST would score those identically and leave the ordering to the tiebreak.
+  const perToken = tokens.map((token) => ladder(codeColumn, nameArColumn, nameEnColumn, token));
+  const average = Prisma.sql`((${Prisma.join(perToken, ' + ')}) / ${tokens.length}::float8)`;
+
+  // The contiguous match still wins when there is one; the average is the floor beneath it.
+  return Prisma.sql`GREATEST(${whole}, ${average})`;
+}
+
+/** One term against one row's columns: the confidence ladder, on normalised forms. */
+function ladder(
+  codeColumn: Prisma.Sql,
+  nameArColumn: Prisma.Sql,
+  nameEnColumn: Prisma.Sql,
+  term: string,
+): Prisma.Sql {
+  const normalized = normalizeSearchTerm(term);
+  const code = compactCode(term);
+
   return Prisma.sql`
     GREATEST(
-      CASE WHEN lower(${codeColumn}) = lower(${term})           THEN 1.00 ELSE 0 END,
-      CASE WHEN ${codeColumn} ILIKE ${term + '%'}               THEN 0.92 ELSE 0 END,
-      CASE WHEN ${codeColumn} ILIKE ${'%' + term + '%'}         THEN 0.85 ELSE 0 END,
-      CASE WHEN ${nameArColumn} ILIKE ${term + '%'}             THEN 0.80 ELSE 0 END,
-      CASE WHEN ${nameEnColumn} ILIKE ${term + '%'}             THEN 0.78 ELSE 0 END,
-      CASE WHEN ${nameArColumn} ILIKE ${'%' + term + '%'}       THEN 0.70 ELSE 0 END,
-      CASE WHEN ${nameEnColumn} ILIKE ${'%' + term + '%'}       THEN 0.68 ELSE 0 END,
-      similarity(${codeColumn}, ${term}) * 0.6,
-      similarity(${nameArColumn}, ${term}) * 0.55,
-      similarity(${nameEnColumn}, ${term}) * 0.55
-    )
+      CASE WHEN erp_compact_code(${codeColumn}) = ${code}                     THEN 1.00 ELSE 0 END,
+      CASE WHEN erp_compact_code(${codeColumn}) LIKE ${code + '%'}            THEN 0.92 ELSE 0 END,
+      CASE WHEN erp_compact_code(${codeColumn}) LIKE ${'%' + code + '%'}      THEN 0.85 ELSE 0 END,
+      CASE WHEN erp_normalize_search(${nameArColumn}) LIKE ${normalized + '%'}       THEN 0.80 ELSE 0 END,
+      CASE WHEN erp_normalize_search(${nameEnColumn}) LIKE ${normalized + '%'}       THEN 0.78 ELSE 0 END,
+      CASE WHEN erp_normalize_search(${nameArColumn}) LIKE ${'%' + normalized + '%'} THEN 0.70 ELSE 0 END,
+      CASE WHEN erp_normalize_search(${nameEnColumn}) LIKE ${'%' + normalized + '%'} THEN 0.68 ELSE 0 END,
+      similarity(erp_compact_code(${codeColumn}), ${code}) * 0.6,
+      similarity(erp_normalize_search(${nameArColumn}), ${normalized}) * 0.55,
+      similarity(erp_normalize_search(${nameEnColumn}), ${normalized}) * 0.55
+    )::float8
   `;
+}
+
+/**
+ * The candidate filter: every token must match somewhere in the row.
+ *
+ * A single `ILIKE '%صفوة خدمات%'` requires the words to be adjacent and in that order, which
+ * they are not in `شركة الصفوة للخدمات`. Requiring each token *independently* — in any of the
+ * row's searchable columns — is what makes typing a second word narrow the list instead of
+ * emptying it.
+ *
+ * `codeColumns` are compared through `erp_compact_code` (separators dropped) and `textColumns`
+ * through `erp_normalize_search` (separators kept, so words stay apart). Passing a name as a
+ * code column would join `شركة الصفوة` into one token and stop it matching either half.
+ *
+ * An empty token list yields `false` rather than `true`: no query should not mean every row.
+ */
+function matchClause(
+  term: string,
+  codeColumns: readonly Prisma.Sql[],
+  textColumns: readonly Prisma.Sql[],
+): Prisma.Sql {
+  const tokens = tokenize(term);
+  if (tokens.length === 0) return Prisma.sql`false`;
+
+  const perToken = tokens.map((token) => {
+    const code = compactCode(token);
+    const alternatives: Prisma.Sql[] = [];
+
+    for (const column of codeColumns) {
+      // A token that normalises to nothing in code form (pure punctuation) would become
+      // LIKE '%%' and match every row, so it is skipped rather than allowed to widen.
+      if (code !== '') {
+        alternatives.push(Prisma.sql`erp_compact_code(${column}) LIKE ${'%' + code + '%'}`);
+      }
+    }
+
+    for (const column of textColumns) {
+      alternatives.push(
+        Prisma.sql`erp_normalize_search(${column}) LIKE ${'%' + token + '%'}`,
+      );
+      alternatives.push(
+        Prisma.sql`similarity(erp_normalize_search(${column}), ${token}) > ${SIMILARITY_FLOOR}`,
+      );
+    }
+
+    if (alternatives.length === 0) return Prisma.sql`false`;
+    return Prisma.sql`(${Prisma.join(alternatives, ' OR ')})`;
+  });
+
+  return Prisma.sql`(${Prisma.join(perToken, ' AND ')})`;
 }
 
 async function searchProducts(
@@ -158,15 +266,11 @@ async function searchProducts(
       FROM "products" p
      WHERE p."tenantId" = ${tenantId}::uuid
        AND (${includeInactive} OR p."isActive")
-       AND (
-            p."sku"     ILIKE ${'%' + term + '%'}
-         OR p."nameAr"  ILIKE ${'%' + term + '%'}
-         OR p."nameEn"  ILIKE ${'%' + term + '%'}
-         OR p."barcode" ILIKE ${'%' + term + '%'}
-         OR similarity(p."sku", ${term})    > ${SIMILARITY_FLOOR}
-         OR similarity(p."nameAr", ${term}) > ${SIMILARITY_FLOOR}
-         OR similarity(p."nameEn", ${term}) > ${SIMILARITY_FLOOR}
-       )
+       AND ${matchClause(
+         term,
+         [Prisma.sql`p."sku"`, Prisma.sql`p."barcode"`],
+         [Prisma.sql`p."nameAr"`, Prisma.sql`p."nameEn"`],
+       )}
      ORDER BY score DESC, p."sku"
      LIMIT ${limit}
   `;
@@ -208,27 +312,23 @@ async function searchCounterparties(
              -- of a 15-digit VAT number is weak, and must not outrank a genuine
              -- code match. Someone typing "1001" wants BTC-1001, not the customer
              -- whose VAT registration happens to contain those digits.
-             CASE WHEN c."taxNumber" = ${term}                 THEN 1.00 ELSE 0 END,
-             CASE WHEN c."phone"     = ${term}                 THEN 1.00 ELSE 0 END,
-             CASE WHEN c."phone"     ILIKE ${term + '%'}       THEN 0.82 ELSE 0 END,
-             CASE WHEN c."taxNumber" ILIKE ${term + '%'}       THEN 0.82 ELSE 0 END,
-             CASE WHEN c."email"     ILIKE ${'%' + term + '%'} THEN 0.72 ELSE 0 END,
-             CASE WHEN c."phone"     ILIKE ${'%' + term + '%'} THEN 0.66 ELSE 0 END,
-             CASE WHEN c."taxNumber" ILIKE ${'%' + term + '%'} THEN 0.64 ELSE 0 END
+             CASE WHEN erp_compact_code(c."taxNumber") = ${compactCode(term)}                 THEN 1.00 ELSE 0 END,
+             CASE WHEN erp_compact_code(c."phone")     = ${compactCode(term)}                 THEN 1.00 ELSE 0 END,
+             CASE WHEN erp_compact_code(c."phone")     LIKE ${compactCode(term) + '%'}        THEN 0.82 ELSE 0 END,
+             CASE WHEN erp_compact_code(c."taxNumber") LIKE ${compactCode(term) + '%'}        THEN 0.82 ELSE 0 END,
+             CASE WHEN erp_normalize_search(c."email") LIKE ${'%' + normalizeSearchTerm(term) + '%'} THEN 0.72 ELSE 0 END,
+             CASE WHEN erp_compact_code(c."phone")     LIKE ${'%' + compactCode(term) + '%'}  THEN 0.66 ELSE 0 END,
+             CASE WHEN erp_compact_code(c."taxNumber") LIKE ${'%' + compactCode(term) + '%'}  THEN 0.64 ELSE 0 END
            )::float8 AS score
       FROM "counterparties" c
      WHERE c."tenantId" = ${tenantId}::uuid
        AND (${includeInactive} OR c."isActive")
-       AND (
-            c."code"      ILIKE ${'%' + term + '%'}
-         OR c."nameAr"    ILIKE ${'%' + term + '%'}
-         OR c."nameEn"    ILIKE ${'%' + term + '%'}
-         OR c."phone"     ILIKE ${'%' + term + '%'}
-         OR c."email"     ILIKE ${'%' + term + '%'}
-         OR c."taxNumber" ILIKE ${'%' + term + '%'}
-         OR similarity(c."nameAr", ${term}) > ${SIMILARITY_FLOOR}
-         OR similarity(c."nameEn", ${term}) > ${SIMILARITY_FLOOR}
-       )
+       AND ${matchClause(
+         term,
+         // Phone and VAT numbers are codes: nobody types a phone number's spacing back.
+         [Prisma.sql`c."code"`, Prisma.sql`c."phone"`, Prisma.sql`c."taxNumber"`],
+         [Prisma.sql`c."nameAr"`, Prisma.sql`c."nameEn"`, Prisma.sql`c."email"`],
+       )}
      ORDER BY score DESC, c."code"
      LIMIT ${limit}
   `;
@@ -265,12 +365,11 @@ async function searchAccounts(
       FROM "accounts" a
      WHERE a."tenantId" = ${tenantId}::uuid
        AND (${includeInactive} OR a."isActive")
-       AND (
-            a."code"   ILIKE ${'%' + term + '%'}
-         OR a."nameAr" ILIKE ${'%' + term + '%'}
-         OR a."nameEn" ILIKE ${'%' + term + '%'}
-         OR similarity(a."nameAr", ${term}) > ${SIMILARITY_FLOOR}
-       )
+       AND ${matchClause(
+         term,
+         [Prisma.sql`a."code"`],
+         [Prisma.sql`a."nameAr"`, Prisma.sql`a."nameEn"`],
+       )}
      ORDER BY score DESC, a."code"
      LIMIT ${limit}
   `;
@@ -309,20 +408,20 @@ async function searchDocuments(
     SELECT d."id", d."documentNumber", d."type"::text AS type, d."status"::text AS status,
            d."total"::text AS total, c."nameAr" AS "counterpartyName",
            GREATEST(
-             CASE WHEN lower(d."documentNumber") = lower(${term}) THEN 1.00 ELSE 0 END,
-             CASE WHEN d."documentNumber" ILIKE ${term + '%'}     THEN 0.92 ELSE 0 END,
-             CASE WHEN d."documentNumber" ILIKE ${'%' + term + '%'} THEN 0.85 ELSE 0 END,
-             CASE WHEN c."nameAr" ILIKE ${'%' + term + '%'}       THEN 0.65 ELSE 0 END,
-             similarity(d."documentNumber", ${term}) * 0.6
+             CASE WHEN erp_compact_code(d."documentNumber") = ${compactCode(term)}                THEN 1.00 ELSE 0 END,
+             CASE WHEN erp_compact_code(d."documentNumber") LIKE ${compactCode(term) + '%'}       THEN 0.92 ELSE 0 END,
+             CASE WHEN erp_compact_code(d."documentNumber") LIKE ${'%' + compactCode(term) + '%'} THEN 0.85 ELSE 0 END,
+             CASE WHEN erp_normalize_search(c."nameAr") LIKE ${'%' + normalizeSearchTerm(term) + '%'} THEN 0.65 ELSE 0 END,
+             similarity(erp_compact_code(d."documentNumber"), ${compactCode(term)}) * 0.6
            )::float8 AS score
       FROM "documents" d
       JOIN "counterparties" c ON c."id" = d."counterpartyId"
      WHERE d."tenantId" = ${tenantId}::uuid
-       AND (
-            d."documentNumber" ILIKE ${'%' + term + '%'}
-         OR c."nameAr" ILIKE ${'%' + term + '%'}
-         OR similarity(d."documentNumber", ${term}) > ${SIMILARITY_FLOOR}
-       )
+       AND ${matchClause(
+         term,
+         [Prisma.sql`d."documentNumber"`],
+         [Prisma.sql`c."nameAr"`],
+       )}
      ORDER BY score DESC, d."issueDate" DESC
      LIMIT ${limit}
   `;
@@ -370,13 +469,11 @@ async function searchEmployees(
       FROM "employees" e
      WHERE e."tenantId" = ${tenantId}::uuid
        AND (${includeInactive} OR e."isActive")
-       AND (
-            e."employeeNumber" ILIKE ${'%' + term + '%'}
-         OR e."fullNameAr"     ILIKE ${'%' + term + '%'}
-         OR e."fullNameEn"     ILIKE ${'%' + term + '%'}
-         OR similarity(e."fullNameAr", ${term}) > ${SIMILARITY_FLOOR}
-         OR similarity(e."fullNameEn", ${term}) > ${SIMILARITY_FLOOR}
-       )
+       AND ${matchClause(
+         term,
+         [Prisma.sql`e."employeeNumber"`],
+         [Prisma.sql`e."fullNameAr"`, Prisma.sql`e."fullNameEn"`],
+       )}
      ORDER BY score DESC, e."employeeNumber"
      LIMIT ${limit}
   `;

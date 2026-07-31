@@ -85,11 +85,28 @@ const config: Config = {
         shimmer: {
           '100%': { transform: 'translateX(100%)' },
         },
+        // The command palette. Two separate keyframes because the backdrop and the panel
+        // should not move together: the blur fades straight in while the panel rises into
+        // it, which is what makes the panel read as sitting *above* the page rather than
+        // being part of the same wash.
+        'overlay-in': {
+          from: { opacity: '0' },
+          to: { opacity: '1' },
+        },
+        'palette-in': {
+          from: { opacity: '0', transform: 'translateY(-8px) scale(0.97)' },
+          to: { opacity: '1', transform: 'translateY(0) scale(1)' },
+        },
       },
       animation: {
         'fade-in': 'fade-in 180ms cubic-bezier(0.16, 1, 0.3, 1)',
         'slide-in-start': 'slide-in-start 220ms cubic-bezier(0.16, 1, 0.3, 1)',
         shimmer: 'shimmer 1.6s infinite',
+        // The same easing curve as the rest of the app — a decelerating cubic-bezier that
+        // arrives rather than stops. 120ms on the backdrop and 160ms on the panel, so the
+        // panel is still settling as the blur completes.
+        'overlay-in': 'overlay-in 120ms ease-out',
+        'palette-in': 'palette-in 160ms cubic-bezier(0.16, 1, 0.3, 1)',
       },
     },
   },

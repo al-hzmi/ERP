@@ -22,7 +22,7 @@ cp .env.example .env        # then set AUTH_SECRET and ENCRYPTION_KEY
 #    openssl rand -hex 32      -> ENCRYPTION_KEY
 
 # 3. Database (PostgreSQL 15+)
-npm run db:migrate          # applies all eleven migrations
+npm run db:migrate          # applies all twelve migrations
 npm run db:seed             # generates and verifies a full demo company
 
 # 4. Run
@@ -43,7 +43,7 @@ it, `auditor` can read everything and change nothing.
 > database is reachable by anyone you did not invite.
 
 ```bash
-npm test           # 584 tests (344 unit + 240 integration)
+npm test           # 621 tests (368 unit + 253 integration)
 npm run typecheck  # strict TypeScript, no `any`, no `@ts-ignore`
 npm run build      # production build
 ```
@@ -114,18 +114,18 @@ src/
 └── styles/
 prisma/
 ├── schema.prisma             7 bounded contexts
-├── migrations/               11 migrations (see below)
+├── migrations/               12 migrations (see below)
 └── seed.ts + seed/           the data generator
 tests/
-├── unit/                     344 tests, no database required
-└── integration/              240 tests against real PostgreSQL
+├── unit/                     368 tests, no database required
+└── integration/              253 tests against real PostgreSQL
 ```
 
 Dependencies point inward. `domain/` imports nothing from `application/` or
 `infrastructure/`, which is why the entire accounting behaviour of the system is
 testable without a database.
 
-### The eleven migrations
+### The twelve migrations
 
 1. **`20260101000000_init`** — the schema Prisma generates.
 2. **`20260101000001_partitioning_constraints_triggers`** — everything Prisma
@@ -176,6 +176,11 @@ testable without a database.
    those invariants would then need an "unless it is a quotation" clause. A confirmed
    document's lines are frozen by trigger, and an assembly order cannot list its own output
    as a component.
+12. **`20260806000000_search_normalisation`** — no tables. `erp_normalize_search()` and
+   `erp_compact_code()`, both IMMUTABLE so they can carry trigram expression indexes, plus
+   those indexes. Four kinds of query returned *zero rows* against the seeded company before
+   it: `١٠٣٨` (Arabic-Indic digits — self-inflicted, since the app prints them), `BTC1038`
+   (the separator nobody types back), `الصفوه` for `الصفوة`, and `الافق` for `الأفق`.
 
 Migration 4 installed the policies; making them *apply* took no further migration,
 only the application change that put every read path inside a tenant scope. See
@@ -280,6 +285,57 @@ by rows that outlive it and every foreign key is `ON DELETE RESTRICT`, so a dele
 would fail on exactly the records old enough to matter and succeed only on ones nobody would
 miss. The usage column is what makes deactivating the honest operation instead of a
 consolation prize.
+
+### The command palette
+
+**Ctrl/Cmd+K anywhere.** One input answering two questions, because a user typing `فوات` does
+not yet know whether they want the register, a new invoice, or invoice 1038 — and making them
+pick a tab first is the tax the control exists to remove.
+
+Two sources with two latencies feed one list. Commands (five create actions and every built
+screen) rank in the browser from a static registry, so they render on the first keystroke with
+no request. Records (products, counterparties, invoices, accounts, employees) come from
+`/api/search` behind a 200 ms debounce and fill in underneath. The palette is never blank
+while something is in flight.
+
+The registry is **derived from `NAVIGATION`**, not listed again: `navigation.test.ts` already
+proves every `href` there resolves to a real page, so the palette inherits that guarantee, and
+an unbuilt screen — which carries no `href` — can never become a destination.
+
+Arrow keys walk a *flat* index; sections are a rendering concern on top. Holding the highlight
+as section-plus-offset makes every keypress reason about boundaries, and the bug that follows
+is the highlight skipping the first row of a section, which is the row it should land on.
+
+### Search matching
+
+Typing `1001` finds `BTC-1001` — a user thinks in the part of the code they remember, not the
+prefix the system assigned. That much predates migration 012. What did **not** work, measured
+against the seeded company, was everything else people actually type:
+
+| typed | before | after |
+|---|---|---|
+| `١٠٣٨` — Arabic-Indic digits | 0 rows | `BTC-1038` |
+| `BTC1038` — no separator | 0 rows | `BTC-1038`, scoring an exact 1.00 |
+| `الصفوه` — ه for ة | 0 rows | 16 counterparties |
+| `الافق` — no hamza | 0 rows | 12 counterparties |
+| `صفوة خدمات` — words not adjacent | 0 rows | ranked, both-word matches first |
+
+The first is self-inflicted: `formatQuantity` renders Arabic-Indic digits, so the application
+printed codes its own search could not find.
+
+Migration 012 adds `erp_normalize_search()` and `erp_compact_code()` — both IMMUTABLE, so they
+carry trigram expression indexes and the folded comparison is still index-served rather than a
+sequential scan. `src/lib/search/normalize.ts` applies the identical rules to the *term*.
+
+Two implementations of one rule set drift silently — a query stops matching and nothing errors
+— so `tests/integration/search-normalisation.test.ts` runs 25 inputs through **both** and
+asserts they agree character for character. It includes the cases that must *not* fold (a bare
+`ء`, Latin text) because a normaliser that folds too much is as broken as one that folds too
+little, and only the negative cases catch that.
+
+Multi-token queries require every token to match somewhere in the row, and score as the
+average of the per-token ladders rather than the best — so a row matching both words outranks
+one matching a single word strongly, which `GREATEST` would tie.
 
 The sidebar is an accordion of five modules, each split into **التهيئة / العمليات / التقارير**
 — the division every large ERP settles on, because it maps to who uses a screen and how often.

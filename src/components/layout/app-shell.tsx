@@ -7,7 +7,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { OfflineBar } from './offline-bar';
 import { cn } from '@/lib/utils/cn';
 import { useUiStore } from '@/store/ui-store';
-import { GlobalSearch } from './global-search';
+import { CommandPalette } from './command-palette';
 import {
   activeModuleFor,
   GROUP_LABELS,
@@ -63,15 +63,19 @@ export function AppShell({
     });
   }
 
-  // Ctrl/Cmd+K opens search from anywhere — the shortcut every user of a system
-  // like this already has in their fingers.
+  // Ctrl/Cmd+K opens the palette from anywhere — the shortcut every user of a system like
+  // this already has in their fingers.
+  //
+  // Escape is deliberately *not* handled here any more. The palette owns its own Escape so
+  // it can hand focus back to whatever opened it; a second handler on the window closed it
+  // first, and focus was left on the body with nothing to tab from.
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent): void {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
-        event.preventDefault();
-        setSearchOpen(true);
-      }
-      if (event.key === 'Escape') setSearchOpen(false);
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'k') return;
+      event.preventDefault();
+      // Toggling, not opening: pressing the shortcut again is how people close it, and
+      // re-opening an already-open palette would reset a query they were halfway through.
+      setSearchOpen((current) => !current);
     }
 
     window.addEventListener('keydown', onKeyDown);
@@ -210,7 +214,7 @@ export function AppShell({
             className="flex h-9 min-w-0 flex-1 max-w-md items-center gap-2 rounded-md border border-input bg-muted/40 px-3 text-sm text-muted-foreground transition-colors hover:bg-muted"
           >
             <Search className="h-4 w-4 shrink-0" aria-hidden="true" />
-            <span className="truncate">بحث في الأصناف والعملاء والفواتير…</span>
+            <span className="truncate">ابحث أو نفّذ أمراً…</span>
             <kbd className="ms-auto hidden shrink-0 rounded border border-border bg-background px-1.5 py-0.5 text-[10px] sm:inline">
               Ctrl K
             </kbd>
@@ -251,7 +255,7 @@ export function AppShell({
         <main className="flex-1 px-6 py-6">{children}</main>
       </div>
 
-      <GlobalSearch
+      <CommandPalette
         open={searchOpen}
         onClose={() => {
           setSearchOpen(false);
