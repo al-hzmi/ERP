@@ -108,6 +108,11 @@ const TENANT_SCOPED_TABLES = [
   // Added by migration 014. A child of `counterparties`, so it carries the denormalised tenant
   // and migration 009's generic guard trigger.
   'customer_credit_profiles',
+  // Added by migration 016. Rooted directly at `tenants` and therefore carries no guard trigger:
+  // there is no parent whose tenant its own could disagree with. It holds the taxpayer's ZATCA
+  // signing key, so a missing policy here would let one tenant read the cryptographic identity
+  // another signs its invoices with.
+  'zatca_configs',
 ] as const;
 
 interface PolicyRow {

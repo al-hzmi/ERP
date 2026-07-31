@@ -1,37 +1,48 @@
-import { createHash } from 'node:crypto';
 import { DomainErrors, type DomainError } from '@/lib/domain/shared/errors';
 import type { Money } from '@/lib/domain/shared/money';
 import type { Quantity } from '@/lib/domain/shared/quantity';
 import { err, ok, type Result } from '@/lib/domain/shared/result';
+import {
+  buildQrPayload as buildQrTlv,
+  canonicalise,
+  escapeXml,
+  formatZatcaTimestamp,
+  sha256Hex,
+  signInvoice,
+  ZatcaCryptoError,
+} from '@/lib/domain/zatca/zatca-crypto';
 import type { TransactionClient } from '@/lib/infrastructure/db/prisma';
+import { allocateInvoiceCounterValue } from './numbering-service';
+import { loadSigningCredentials } from './zatca-config-service';
 
 /**
  * ZATCA (Fatoora) Phase 2 e-invoicing.
  *
- * Produces the three artefacts the regulation requires for every invoice:
+ * Produces the artefacts the regulation requires for every invoice:
  *   - a UBL 2.1 XML document,
- *   - a SHA-256 hash chained to the previous invoice's hash,
- *   - a Base64 TLV QR payload.
+ *   - a monotonic invoice counter (ICV),
+ *   - a SHA-256 hash chained to the previous invoice's hash (PIH),
+ *   - an ECDSA P-256 signature in a XAdES envelope, when the tenant is onboarded,
+ *   - a Base64 TLV QR payload carrying tags 1–6, or 1–9 once signed.
  *
- * What is deliberately NOT here: the ECDSA signature (QR tags 7–9) and the
- * clearance call. Both require a Cryptographic Stamp Identifier issued by ZATCA
- * to a specific taxpayer after onboarding, which cannot be fabricated. The
- * envelope is built so that signing is an addition at onboarding time rather
- * than a rewrite: `previousHash`, `invoiceHash` and the canonical XML are all
- * already correct and already chained.
+ * ## Signing is conditional, and that is the design
+ *
+ * The signature needs a CSID that ZATCA issues to one device belonging to one taxpayer, after
+ * onboarding. A system in its first week does not have one. Refusing to post an invoice until
+ * it does would stop the business from trading, so an un-onboarded tenant gets a correct
+ * *unsigned* envelope — right XML, right chain, right counter, six-tag QR — and the invoice is
+ * marked `PENDING`. When the CSID arrives, signing begins with no change to anything else.
+ *
+ * The one thing that is never done is pretending. An unsigned invoice does not get a nine-tag
+ * QR with empty values, and its status is not `REPORTED`.
+ *
+ * ## The order of hashing
+ *
+ * The chain hash is taken over the *unsigned* canonical XML. The signature is then built over
+ * that digest and inserted into the document afterwards. Digesting the assembled document
+ * instead would hash the signature that covers the hash, and no verifier would accept it. See
+ * `zatca-crypto.ts` for the full sequence.
  */
-
-/** TLV tags defined by the ZATCA QR specification. */
-const QrTag = {
-  SellerName: 1,
-  SellerVatNumber: 2,
-  Timestamp: 3,
-  InvoiceTotal: 4,
-  VatTotal: 5,
-  XmlHash: 6,
-} as const;
-
-type QrTagValue = (typeof QrTag)[keyof typeof QrTag];
 
 /** The genesis hash: SHA-256 of "0", per the ZATCA hash-chain specification. */
 const GENESIS_PREVIOUS_HASH =
@@ -67,6 +78,9 @@ export interface ZatcaInvoiceResult {
   readonly qrCode: string;
   readonly xml: string;
   readonly invoiceTypeCode: 'STANDARD' | 'SIMPLIFIED';
+  readonly icv: bigint;
+  /** False when the tenant has not onboarded — the invoice is valid, just not yet stamped. */
+  readonly signed: boolean;
 }
 
 /**
@@ -100,25 +114,89 @@ export async function generateZatcaInvoice(
 
   const previousHash = await readPreviousHash(tx, input.tenantId);
 
-  const xml = buildUblXml({
+  // Allocated before the XML is built, because the counter is *in* the XML and therefore in
+  // the digest the signature covers.
+  const icv = await allocateInvoiceCounterValue(tx, input.tenantId);
+
+  const unsignedXml = buildUblXml({
     ...input,
     invoiceUuid,
     issuedAtUtc,
     previousHash,
     invoiceTypeCode,
     sellerVatNumber: input.sellerVatNumber,
+    icv,
   });
 
-  const invoiceHash = createHash('sha256').update(canonicalise(xml), 'utf8').digest('hex');
+  const canonicalXml = canonicalise(unsignedXml);
+  const invoiceHash = sha256Hex(canonicalXml);
 
-  const qrCode = buildQrPayload({
-    sellerName: input.sellerNameAr,
-    sellerVatNumber: input.sellerVatNumber,
-    timestamp: issuedAtUtc,
-    invoiceTotal: input.totalWithVat,
-    vatTotal: input.vatTotal,
-    invoiceHash,
-  });
+  const credentials = await loadSigningCredentials(tx, input.tenantId);
+
+  let signed: {
+    signatureValue: string;
+    publicKey: string;
+    certSignature: string;
+    xml: string;
+    qrCode: string;
+  } | null = null;
+
+  if (credentials !== null) {
+    try {
+      const stamp = signInvoice({
+        canonicalXml,
+        privateKey: credentials.privateKey,
+        certificate: credentials.certificate,
+        signingTime: issuedAtUtc,
+      });
+
+      const qrCode = buildQrTlv({
+        sellerName: input.sellerNameAr,
+        sellerVatNumber: input.sellerVatNumber,
+        timestamp: issuedAtUtc,
+        invoiceTotal: input.totalWithVat.toFixed(2),
+        vatTotal: input.vatTotal.toFixed(2),
+        invoiceHashHex: invoiceHash,
+        signatureBase64: stamp.signatureValue,
+        publicKeyDer: stamp.publicKeyDer,
+        certificateSignature: stamp.certificateSignature,
+      });
+
+      signed = {
+        signatureValue: stamp.signatureValue,
+        publicKey: stamp.publicKeyDer.toString('base64'),
+        certSignature: stamp.certificateSignature.toString('base64'),
+        xml: assembleSignedXml(unsignedXml, stamp.extensionXml, qrCode),
+        qrCode,
+      };
+    } catch (error) {
+      // A stored key that will not load must not take down the sale. The invoice posts
+      // unsigned and `PENDING`, and the failure is surfaced as a domain error rather than a
+      // stack trace so the operator learns their credentials are broken.
+      if (!(error instanceof ZatcaCryptoError)) throw error;
+
+      return err(
+        DomainErrors.validation(
+          `تعذَّر توقيع الفاتورة إلكترونياً: ${error.message} — يُرجى مراجعة شهادة CSID والمفتاح الخاص في إعدادات الفوترة الإلكترونية.`,
+          `The invoice could not be signed: ${error.message}`,
+          'zatcaConfig',
+        ),
+      );
+    }
+  }
+
+  const qrCode =
+    signed?.qrCode ??
+    buildQrTlv({
+      sellerName: input.sellerNameAr,
+      sellerVatNumber: input.sellerVatNumber,
+      timestamp: issuedAtUtc,
+      invoiceTotal: input.totalWithVat.toFixed(2),
+      vatTotal: input.vatTotal.toFixed(2),
+      invoiceHashHex: invoiceHash,
+    });
+
+  const xml = signed?.xml ?? assembleSignedXml(unsignedXml, '', qrCode);
 
   await tx.zatcaInvoice.create({
     data: {
@@ -131,10 +209,69 @@ export async function generateZatcaInvoice(
       xml,
       invoiceTypeCode,
       issuedAtUtc,
+      icv,
+      signature: signed?.signatureValue ?? null,
+      publicKey: signed?.publicKey ?? null,
+      certSignature: signed?.certSignature ?? null,
     },
   });
 
-  return ok({ invoiceUuid, invoiceHash, previousHash, qrCode, xml, invoiceTypeCode });
+  return ok({
+    invoiceUuid,
+    invoiceHash,
+    previousHash,
+    qrCode,
+    xml,
+    invoiceTypeCode,
+    icv,
+    signed: signed !== null,
+  });
+}
+
+/**
+ * Inserts the signature extension and the QR node into the invoice.
+ *
+ * Both go in *after* the digest was taken, and both are excluded by the `SignedInfo`
+ * transforms, so a verifier strips them back out and arrives at the same digest. The extension
+ * goes first inside the root because UBL fixes that order; the QR reference joins the other
+ * `AdditionalDocumentReference` elements.
+ */
+function assembleSignedXml(unsignedXml: string, extensionXml: string, qrBase64: string): string {
+  const rootEnd = unsignedXml.indexOf('>', unsignedXml.indexOf('<Invoice'));
+  if (rootEnd === -1) {
+    throw new Error('The generated invoice has no <Invoice> root element.');
+  }
+
+  const qrNode = `  <cac:AdditionalDocumentReference>
+    <cbc:ID>QR</cbc:ID>
+    <cac:Attachment>
+      <cbc:EmbeddedDocumentBinaryObject mimeCode="text/plain">${escapeXml(qrBase64)}</cbc:EmbeddedDocumentBinaryObject>
+    </cac:Attachment>
+  </cac:AdditionalDocumentReference>
+`;
+
+  const signatureNode =
+    extensionXml === ''
+      ? ''
+      : `  <cac:Signature>
+    <cbc:ID>urn:oasis:names:specification:ubl:signature:Invoice</cbc:ID>
+    <cbc:SignatureMethod>urn:oasis:names:specification:ubl:dsig:enveloped:xades</cbc:SignatureMethod>
+  </cac:Signature>
+`;
+
+  const head = unsignedXml.slice(0, rootEnd + 1);
+  const tail = unsignedXml.slice(rootEnd + 1);
+
+  const anchor = tail.indexOf('  <cac:AccountingSupplierParty>');
+  if (anchor === -1) {
+    throw new Error('The generated invoice has no supplier party to anchor the QR node against.');
+  }
+
+  // `extensionXml` is empty on an unsigned invoice, and concatenating a newline anyway would
+  // leave a stray blank line under the root element.
+  const extension = extensionXml === '' ? '' : `\n${extensionXml.replace(/\n$/, '')}`;
+
+  return `${head}${extension}${tail.slice(0, anchor)}${qrNode}${signatureNode}${tail.slice(anchor)}`;
 }
 
 /**
@@ -157,91 +294,13 @@ async function readPreviousHash(tx: TransactionClient, tenantId: string): Promis
   return rows[0]?.invoiceHash ?? GENESIS_PREVIOUS_HASH;
 }
 
-/**
- * Encodes the QR payload as Base64 TLV.
- *
- * TLV means each field is `[tag byte][length byte][value bytes]`. The length is
- * the byte length of the UTF-8 encoding, not the character count — an Arabic
- * seller name is roughly two bytes per character, and getting this wrong is the
- * single most common reason a QR code fails ZATCA validation while looking
- * perfectly fine to the eye.
- */
-export function buildQrPayload(input: {
-  sellerName: string;
-  sellerVatNumber: string;
-  timestamp: Date;
-  invoiceTotal: Money;
-  vatTotal: Money;
-  invoiceHash?: string;
-}): string {
-  const fields: [QrTagValue, string][] = [
-    [QrTag.SellerName, input.sellerName],
-    [QrTag.SellerVatNumber, input.sellerVatNumber],
-    [QrTag.Timestamp, input.timestamp.toISOString()],
-    [QrTag.InvoiceTotal, input.invoiceTotal.toFixed(2)],
-    [QrTag.VatTotal, input.vatTotal.toFixed(2)],
-  ];
-
-  if (input.invoiceHash !== undefined) {
-    fields.push([QrTag.XmlHash, input.invoiceHash]);
-  }
-
-  const chunks: Buffer[] = [];
-
-  for (const [tag, value] of fields) {
-    const valueBytes = Buffer.from(value, 'utf8');
-    if (valueBytes.length > 255) {
-      // A single TLV length byte caps a field at 255 bytes; truncating on a byte
-      // boundary would split a multi-byte character and corrupt the payload.
-      const truncated = truncateUtf8(value, 255);
-      const truncatedBytes = Buffer.from(truncated, 'utf8');
-      chunks.push(Buffer.from([tag, truncatedBytes.length]), truncatedBytes);
-      continue;
-    }
-    chunks.push(Buffer.from([tag, valueBytes.length]), valueBytes);
-  }
-
-  return Buffer.concat(chunks).toString('base64');
-}
-
-/** Decodes a TLV payload — used by the verification endpoint and by the tests. */
-export function parseQrPayload(base64: string): { tag: number; value: string }[] {
-  const buffer = Buffer.from(base64, 'base64');
-  const fields: { tag: number; value: string }[] = [];
-
-  let offset = 0;
-  while (offset + 2 <= buffer.length) {
-    const tag = buffer.readUInt8(offset);
-    const length = buffer.readUInt8(offset + 1);
-    const start = offset + 2;
-    const end = start + length;
-    if (end > buffer.length) break;
-    fields.push({ tag, value: buffer.subarray(start, end).toString('utf8') });
-    offset = end;
-  }
-
-  return fields;
-}
-
-/** Cuts a string to at most `maxBytes` UTF-8 bytes without splitting a character. */
-function truncateUtf8(value: string, maxBytes: number): string {
-  let result = '';
-  let bytes = 0;
-  for (const character of value) {
-    const size = Buffer.byteLength(character, 'utf8');
-    if (bytes + size > maxBytes) break;
-    result += character;
-    bytes += size;
-  }
-  return result;
-}
-
 interface UblInput extends GenerateZatcaInvoiceInput {
   readonly invoiceUuid: string;
   readonly issuedAtUtc: Date;
   readonly previousHash: string;
   readonly invoiceTypeCode: 'STANDARD' | 'SIMPLIFIED';
   readonly sellerVatNumber: string;
+  readonly icv: bigint;
 }
 
 /**
@@ -306,6 +365,10 @@ function buildUblXml(input: UblInput): string {
   <cbc:DocumentCurrencyCode>${escapeXml(input.currency)}</cbc:DocumentCurrencyCode>
   <cbc:TaxCurrencyCode>SAR</cbc:TaxCurrencyCode>
   <cac:AdditionalDocumentReference>
+    <cbc:ID>ICV</cbc:ID>
+    <cbc:UUID>${input.icv.toString()}</cbc:UUID>
+  </cac:AdditionalDocumentReference>
+  <cac:AdditionalDocumentReference>
     <cbc:ID>PIH</cbc:ID>
     <cac:Attachment>
       <cbc:EmbeddedDocumentBinaryObject mimeCode="text/plain">${escapeXml(
@@ -344,28 +407,3 @@ ${lines}
 </Invoice>`;
 }
 
-/**
- * Minimal canonicalisation before hashing.
- *
- * ZATCA hashes a C14N-canonicalised document with the signature elements
- * removed. Ours contains no signature yet, so normalising line endings and
- * trailing whitespace is sufficient and, critically, deterministic — the same
- * invoice always hashes to the same value.
- */
-function canonicalise(xml: string): string {
-  return xml
-    .replace(/\r\n/g, '\n')
-    .split('\n')
-    .map((line) => line.trimEnd())
-    .join('\n')
-    .trim();
-}
-
-function escapeXml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
-}

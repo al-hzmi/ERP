@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildQrPayload, parseQrPayload } from '@/lib/application/services/zatca-service';
+import { buildQrPayload, parseQrPayload } from '@/lib/domain/zatca/zatca-crypto';
 import { Money } from '@/lib/domain/shared/money';
 import { unwrap } from '@/lib/domain/shared/result';
 import {
@@ -16,19 +16,25 @@ describe('ZATCA QR payload', () => {
     sellerName: 'شركة الأفق المتحدة للتجارة',
     sellerVatNumber: '300000000000003',
     timestamp: new Date('2026-03-15T09:30:00.000Z'),
-    invoiceTotal: Money.of('1150.00', 'SAR'),
-    vatTotal: Money.of('150.00', 'SAR'),
+    invoiceTotal: '1150.00',
+    vatTotal: '150.00',
   };
 
   it('round-trips through TLV encoding', () => {
     const fields = parseQrPayload(buildQrPayload(input));
 
     expect(fields).toHaveLength(5);
-    expect(fields[0]).toEqual({ tag: 1, value: input.sellerName });
-    expect(fields[1]).toEqual({ tag: 2, value: '300000000000003' });
-    expect(fields[2]).toEqual({ tag: 3, value: '2026-03-15T09:30:00.000Z' });
-    expect(fields[3]).toEqual({ tag: 4, value: '1150.00' });
-    expect(fields[4]).toEqual({ tag: 5, value: '150.00' });
+    expect(fields[0]?.text).toBe(input.sellerName);
+    expect(fields[1]?.text).toBe('300000000000003');
+    expect(fields[3]?.text).toBe('1150.00');
+    expect(fields[4]?.text).toBe('150.00');
+  });
+
+  it('writes the timestamp without milliseconds', () => {
+    // `toISOString()` emits `.000Z`, and the ZATCA validator rejects it. A one-character
+    // difference that costs a whole submission round trip to discover.
+    const fields = parseQrPayload(buildQrPayload(input));
+    expect(fields[2]?.text).toBe('2026-03-15T09:30:00Z');
   });
 
   it('encodes the length in BYTES, not characters', () => {
@@ -41,10 +47,15 @@ describe('ZATCA QR payload', () => {
     expect(declaredLength).not.toBe(input.sellerName.length);
   });
 
-  it('includes the invoice hash when one is supplied', () => {
-    const fields = parseQrPayload(buildQrPayload({ ...input, invoiceHash: 'a'.repeat(64) }));
+  it('carries the invoice hash as Base64, not hex', () => {
+    // Tag 6 is the Base64 of the 32 digest bytes — 44 characters. Putting the 64-character
+    // hex string in instead is accepted by every JSON parser and rejected by ZATCA.
+    const hex = 'a'.repeat(64);
+    const fields = parseQrPayload(buildQrPayload({ ...input, invoiceHashHex: hex }));
     expect(fields).toHaveLength(6);
     expect(fields[5]?.tag).toBe(6);
+    expect(fields[5]?.text).toBe(Buffer.from(hex, 'hex').toString('base64'));
+    expect(fields[5]?.text).not.toBe(hex);
   });
 
   it('truncates an over-long field on a character boundary', () => {
@@ -52,9 +63,15 @@ describe('ZATCA QR payload', () => {
     // would emit invalid UTF-8.
     const long = { ...input, sellerName: 'م'.repeat(400) };
     const fields = parseQrPayload(buildQrPayload(long));
-    const name = fields[0]?.value ?? '';
+    const name = fields[0]?.text ?? '';
     expect(Buffer.byteLength(name, 'utf8')).toBeLessThanOrEqual(255);
-    expect(name).not.toContain('�');
+    expect(name).not.toContain('\uFFFD');
+  });
+
+  it('omits tags 7 to 9 entirely when the invoice is unsigned', () => {
+    // An empty tag 7 is a claim that the invoice is signed. Absent is the truthful encoding.
+    const fields = parseQrPayload(buildQrPayload({ ...input, invoiceHashHex: 'b'.repeat(64) }));
+    expect(fields.map((field) => field.tag)).toEqual([1, 2, 3, 4, 5, 6]);
   });
 
   it('produces valid Base64', () => {

@@ -107,6 +107,7 @@ model Tenant {
   assemblyOrderLines    AssemblyOrderLine[]
   ApprovalRuleCondition ApprovalRuleCondition[]
   CustomerCreditProfile CustomerCreditProfile[]
+  zatcaConfig           ZatcaConfig?
 
   @@index([isActive])
   @@map("tenants")
@@ -870,12 +871,12 @@ model Counterparty {
   createdAt      DateTime          @default(now()) @db.Timestamptz(6)
   updatedAt      DateTime          @updatedAt @db.Timestamptz(6)
 
-  tenant                Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  documents             Document[]
-  payments              Payment[]
-  journalLines          JournalLine[]
-  tradeDocuments        TradeDocument[]
-  creditProfile         CustomerCreditProfile?
+  tenant         Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  documents      Document[]
+  payments       Payment[]
+  journalLines   JournalLine[]
+  tradeDocuments TradeDocument[]
+  creditProfile  CustomerCreditProfile?
 
   @@unique([tenantId, code])
   @@index([tenantId, type, isActive])
@@ -976,34 +977,114 @@ model DocumentLine {
 
 /// ZATCA Phase 2 (Fatoora) e-invoicing envelope. One row per posted sales invoice.
 model ZatcaInvoice {
-  id              String    @id @default(uuid()) @db.Uuid
+  id              String                @id @default(uuid()) @db.Uuid
   /// Denormalised from its document so this table can carry a row-level security policy of its
   /// own. A trigger (migration 009) refuses any row whose tenant disagrees with its parent's,
   /// so the denormalisation cannot become a second source of truth.
-  tenantId        String    @db.Uuid
-  documentId      String    @unique @db.Uuid
+  tenantId        String                @db.Uuid
+  documentId      String                @unique @db.Uuid
   /// Invoice UUID required by the ZATCA XML (`cbc:UUID`).
-  invoiceUuid     String    @unique @db.Uuid
+  invoiceUuid     String                @unique @db.Uuid
   /// SHA-256 of the previous invoice's canonicalised XML — the invoice hash chain.
-  previousHash    String    @db.VarChar(64)
-  invoiceHash     String    @db.VarChar(64)
+  previousHash    String                @db.VarChar(64)
+  invoiceHash     String                @db.VarChar(64)
   /// TLV-encoded, Base64 QR payload (seller name, VAT no, timestamp, total, VAT).
   qrCode          String
   /// Signed UBL 2.1 XML document.
   xml             String
   /// `STANDARD` (B2B, clearance) or `SIMPLIFIED` (B2C, reporting).
-  invoiceTypeCode String    @db.VarChar(16)
+  invoiceTypeCode String                @db.VarChar(16)
   /// UTC timestamp embedded in the QR/TLV payload.
-  issuedAtUtc     DateTime  @db.Timestamptz(6)
-  submittedAt     DateTime? @db.Timestamptz(6)
-  clearanceStatus String?   @db.VarChar(32)
-  createdAt       DateTime  @default(now()) @db.Timestamptz(6)
+  issuedAtUtc     DateTime              @db.Timestamptz(6)
+  submittedAt     DateTime?             @db.Timestamptz(6)
+  clearanceStatus String?               @db.VarChar(32)
+  /// Invoice Counter Value. A monotonic per-tenant counter the cryptographic stamp commits to;
+  /// ZATCA reads a gap in it as a suppressed invoice. Allocated from `number_sequences` through
+  /// `erp_next_document_number`, never from `count(*) + 1` — two concurrent writers would read
+  /// the same count and produce the same ICV.
+  icv             BigInt
+  status          ZatcaSubmissionStatus @default(PENDING)
+  /// ECDSA P-256 signature over the canonical XML digest, Base64. QR tag 7.
+  signature       String?
+  /// The signing certificate's public key (tag 8) and the issuer's signature over it (tag 9).
+  publicKey       String?
+  certSignature   String?
+  /// ZATCA's answer, verbatim. A rejection names the exact rule that failed, and paraphrasing
+  /// it into a status code loses the only thing that helps fix it.
+  responseJson    Json?
+  warningCount    Int                   @default(0)
+  lastAttemptAt   DateTime?             @db.Timestamptz(6)
+  attemptCount    Int                   @default(0)
+  createdAt       DateTime              @default(now()) @db.Timestamptz(6)
 
   tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   document Document @relation(fields: [documentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
+  @@unique([tenantId, icv])
   @@index([issuedAtUtc])
   @@map("zatca_invoices")
+}
+
+/// ZATCA runs three tiers, and onboarding passes through all of them: sandbox for development,
+/// simulation for the compliance checks that must pass before production credentials are
+/// issued, then production.
+enum ZatcaEnvironment {
+  SANDBOX
+  SIMULATION
+  PRODUCTION
+}
+
+enum ZatcaSubmissionStatus {
+  /// Generated and signed, not yet sent.
+  PENDING
+  /// Simplified (B2C): reported within 24 hours of issue. ZATCA accepted it.
+  REPORTED
+  /// Standard (B2B): cleared before issue. ZATCA returned the stamped invoice.
+  CLEARED
+  /// Accepted, with warnings that still need reading. Kept distinct from CLEARED because
+  /// folding warnings into success guarantees nobody ever reads them.
+  ACCEPTED_WITH_WARNINGS
+  FAILED
+}
+
+/// The taxpayer's cryptographic stamp identity, issued by ZATCA to a specific device during
+/// onboarding. One per tenant: two would be two identities for one taxpayer, and whichever the
+/// query returned first would sign the invoice.
+model ZatcaConfig {
+  id                    String           @id @default(uuid()) @db.Uuid
+  tenantId              String           @unique @db.Uuid
+  environment           ZatcaEnvironment @default(SANDBOX)
+  /// 15 digits, starting and ending with 3 — enforced by a CHECK constraint, because a
+  /// malformed one is only rejected by ZATCA after the invoice is in the customer's hands.
+  sellerVatNumber       String           @db.VarChar(15)
+  sellerNameAr          String           @db.VarChar(256)
+  commercialRegNo       String?          @db.VarChar(32)
+  streetName            String?          @db.VarChar(128)
+  buildingNumber        String?          @db.VarChar(8)
+  citySubdivision       String?          @db.VarChar(128)
+  cityName              String?          @db.VarChar(128)
+  postalZone            String?          @db.VarChar(8)
+  /// Base64 X.509 certificate returned by onboarding, and the secret that authenticates
+  /// subsequent API calls.
+  csidCertificate       String?
+  csidSecretEnc         String?
+  /// The EC P-256 private key whose public half is in that certificate. AES-256-GCM at rest via
+  /// `encryptField` — the `Enc` suffix is what the field-protection list keys on. Anyone holding
+  /// this can sign invoices ZATCA will attribute to this taxpayer.
+  privateKeyEnc         String?
+  /// The compliance CSID used during onboarding, before production credentials are issued.
+  complianceCertificate String?
+  complianceSecretEnc   String?
+  onboardedAt           DateTime?        @db.Timestamptz(6)
+  /// Activation starts signing real invoices, so a CHECK constraint refuses it without a key
+  /// and a certificate.
+  isActive              Boolean          @default(false)
+  createdAt             DateTime         @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime         @default(now()) @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@map("zatca_configs")
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

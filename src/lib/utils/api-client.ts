@@ -70,3 +70,8 @@ export async function apiFetch<T>(url: string, init?: RequestInit): Promise<ApiR
 export function apiPost<T>(url: string, payload: unknown): Promise<ApiResult<T>> {
   return apiFetch<T>(url, { method: 'POST', body: JSON.stringify(payload) });
 }
+
+/** A read. Separate from `apiFetch` only so call sites read as what they do. */
+export function apiGet<T>(url: string): Promise<ApiResult<T>> {
+  return apiFetch<T>(url, { method: 'GET' });
+}

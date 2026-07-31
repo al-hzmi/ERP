@@ -3,6 +3,7 @@ import { Plus } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardHeader } from '@/components/ui/card';
+import { ZatcaCell } from '@/components/sales/zatca-cell';
 import { withPageScope } from '@/lib/api/page';
 import { prisma } from '@/lib/infrastructure/db/prisma';
 import { formatDate, formatMoney, statusLabel } from '@/lib/utils/format';
@@ -30,7 +31,7 @@ export default async function SalesInvoicesPage({
   const status = searchParams.status;
   const query = searchParams.q?.trim();
 
-  const { invoices, total, tenant, canCreate } = await withPageScope(async (context) => {
+  const { invoices, total, tenant, canCreate, canSubmit } = await withPageScope(async (context) => {
     const where = {
       tenantId: context.tenantId,
       type: 'SALES_INVOICE' as const,
@@ -59,6 +60,9 @@ export default async function SalesInvoicesPage({
           paidAmount: true,
           counterparty: { select: { code: true, nameAr: true } },
           branch: { select: { nameAr: true } },
+          // The envelope's *state*, not its contents. Enough to render a badge; the XML and
+          // the decoded QR are fetched only when someone opens the panel.
+          zatca: { select: { status: true, signature: true } },
         },
         orderBy: [{ issueDate: 'desc' }, { documentNumber: 'desc' }],
         skip: (page - 1) * PAGE_SIZE,
@@ -76,6 +80,7 @@ export default async function SalesInvoicesPage({
       total: loadedTotal,
       tenant: loadedTenant,
       canCreate: context.permissions.can('sales.invoice', 'create'),
+      canSubmit: context.permissions.can('finance.invoice', 'update'),
     };
   });
 
@@ -148,12 +153,13 @@ export default async function SalesInvoicesPage({
                 <th scope="col" className="numeric">المسدد</th>
                 <th scope="col" className="numeric">المتبقي</th>
                 <th scope="col">الحالة</th>
+                <th scope="col">الفوترة الإلكترونية</th>
               </tr>
             </thead>
             <tbody>
               {invoices.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="py-16 text-center text-muted-foreground">
+                  <td colSpan={10} className="py-16 text-center text-muted-foreground">
                     لا توجد فواتير مطابقة للتصفية الحالية
                   </td>
                 </tr>
@@ -211,6 +217,14 @@ export default async function SalesInvoicesPage({
                       </td>
                       <td>
                         <Badge tone={badge.tone}>{badge.label}</Badge>
+                      </td>
+                      <td>
+                        <ZatcaCell
+                          documentId={invoice.id}
+                          status={invoice.zatca?.status ?? null}
+                          isSigned={(invoice.zatca?.signature ?? null) !== null}
+                          canSubmit={canSubmit}
+                        />
                       </td>
                     </tr>
                   );

@@ -137,3 +137,46 @@ export async function peekNextDocumentNumber(
 
   return `${prefix}-${year}-${next.toString().padStart(padding, '0')}`;
 }
+
+/**
+ * Allocates the next ZATCA Invoice Counter Value for a tenant.
+ *
+ * ICV is a bare integer, not a formatted document number, and it must not reset — ZATCA reads a
+ * discontinuity in it as an invoice that was issued and then hidden. So it is stored under the
+ * sentinel year `0`, which no real fiscal year uses, and therefore never rolls over on the 1st
+ * of January the way `INV-2026-00001` does.
+ *
+ * It goes through `erp_next_document_number` rather than `SELECT count(*) + 1` for the reason
+ * that function exists: the count is read outside any lock, so two invoices posted in the same
+ * instant would both compute the same next value, and the unique index would then reject one of
+ * them *after* the accounting entries had been written.
+ */
+export async function allocateInvoiceCounterValue(
+  tx: TransactionClient,
+  tenantId: string,
+): Promise<bigint> {
+  const rows = await tx.$queryRaw<{ number: string }[]>`
+    SELECT erp_next_document_number(
+      ${tenantId}::uuid,
+      'ZATCA_ICV'::text,
+      0::int,
+      'ICV'::text,
+      12::int
+    ) AS number
+  `;
+
+  const allocated = rows[0]?.number;
+  if (allocated === undefined) {
+    throw new Error('Failed to allocate a ZATCA invoice counter value.');
+  }
+
+  // `ICV-0-000000000042` — the counter is the last dash-separated field.
+  const counter = allocated.slice(allocated.lastIndexOf('-') + 1);
+  const value = BigInt(counter);
+
+  if (value <= 0n) {
+    throw new Error(`Allocated an invalid ZATCA counter value from "${allocated}".`);
+  }
+
+  return value;
+}

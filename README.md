@@ -22,7 +22,7 @@ cp .env.example .env        # then set AUTH_SECRET and ENCRYPTION_KEY
 #    openssl rand -hex 32      -> ENCRYPTION_KEY
 
 # 3. Database (PostgreSQL 15+)
-npm run db:migrate          # applies all fifteen migrations
+npm run db:migrate          # applies all sixteen migrations
 npm run db:seed             # generates and verifies a full demo company
 
 # 4. Run
@@ -43,7 +43,7 @@ it, `auditor` can read everything and change nothing.
 > database is reachable by anyone you did not invite.
 
 ```bash
-npm test           # 691 tests (404 unit + 287 integration)
+npm test           # 749 tests (442 unit + 307 integration)
 npm run typecheck  # strict TypeScript, no `any`, no `@ts-ignore`
 npm run build      # production build
 ```
@@ -114,18 +114,18 @@ src/
 └── styles/
 prisma/
 ├── schema.prisma             7 bounded contexts
-├── migrations/               15 migrations (see below)
+├── migrations/               16 migrations (see below)
 └── seed.ts + seed/           the data generator
 tests/
-├── unit/                     404 tests, no database required
-└── integration/              287 tests against real PostgreSQL
+├── unit/                     442 tests, no database required
+└── integration/              307 tests against real PostgreSQL
 ```
 
 Dependencies point inward. `domain/` imports nothing from `application/` or
 `infrastructure/`, which is why the entire accounting behaviour of the system is
 testable without a database.
 
-### The fifteen migrations
+### The sixteen migrations
 
 1. **`20260101000000_init`** — the schema Prisma generates.
 2. **`20260101000001_partitioning_constraints_triggers`** — everything Prisma
@@ -197,6 +197,15 @@ testable without a database.
    14's new enum values. Its own file because PostgreSQL refuses to reference a new enum value
    from the transaction that added it, and Prisma wraps each migration in one. Migration 13's
    header warned about this; migration 14 hit it anyway on first deploy.
+16. **`20260809000000_zatca_phase2`** — the device credentials (`zatca_configs`), the invoice
+   counter, and the submission state machine. Three decisions are recorded in its header. The
+   private key is `privateKeyEnc`, encrypted at rest, because the `Enc` suffix is what the
+   field-protection list keys on and a CSID private key is the taxpayer's cryptographic
+   identity. ICV comes from `erp_next_document_number`, not `count(*) + 1`, because two
+   concurrent writers would read the same count — and ZATCA reads a gap in the counter as an
+   invoice that was issued and then hidden. And the status lives on `zatca_invoices` rather
+   than on `documents`: a purchase invoice would carry a meaningless column, and `documents`
+   is the partitioned table every posting path writes.
 
 Migration 4 installed the policies; making them *apply* took no further migration,
 only the application change that put every read path inside a tenant scope. See
@@ -220,7 +229,8 @@ only the application change that put every read path inside a tenant scope. See
 | Concurrency | `application/services/inventory-service.ts` | Row locks taken *before* the read a decision depends on, so two concurrent sales of the last unit cannot both succeed |
 | Segregation of duties | `infrastructure/auth/segregation-of-duties.ts` | A conflict matrix over lifecycle steps, plus toxic-combination detection at role-assignment time |
 | Search | `application/services/search-service.ts` | Exact/prefix/substring/trigram combined into one SQL-side relevance score — typing `1001` finds `BTC-1001` |
-| ZATCA | `application/services/zatca-service.ts` | UBL 2.1 XML, chained SHA-256 invoice hash, byte-correct Base64 TLV QR payload |
+| ZATCA envelope | `application/services/zatca-service.ts` | UBL 2.1 XML, gap-free invoice counter, SHA-256 chained to the predecessor, byte-correct Base64 TLV QR |
+| ZATCA cryptography | `domain/zatca/zatca-crypto.ts` | ECDSA P-256 over a XAdES `SignedInfo`, the certificate digest computed ZATCA's non-obvious way, and QR tags 7–9 carried as raw DER rather than double-encoded |
 | Outbox claiming | `infrastructure/events/event-bus.ts` | A claim written by the statement that takes the lock, so it outlives the transaction — dispatch then happens outside one, because handlers do I/O |
 | The dispatch loop | `infrastructure/events/outbox-runner.ts` | `setTimeout` re-armed after each tick rather than `setInterval`, so a slow tick is never overlapped; jitter so replicas do not poll in lockstep |
 | Shared rate limits | `migrations/…_shared_rate_limits/migration.sql` | Read, decide and increment as one atomic unit per key, because expressed as separate statements two instances both get admitted |
@@ -532,16 +542,30 @@ excluding recoverable VAT; both FIFO and weighted average are supported.
 immediately.
 
 **ZATCA Phase 2** — every posted sales invoice produces a UUID, a UBL 2.1 XML
-document, a SHA-256 hash chained to its predecessor, and a Base64 TLV QR
-payload. What is *not* implemented is the ECDSA signature (QR tags 7–9) and the
-clearance API call, and that is now a scope decision rather than a gap: both require a
-Cryptographic Stamp Identifier issued by ZATCA to a specific taxpayer after onboarding,
-and this is a reference implementation rather than a system that will invoice one.
+document, a gap-free invoice counter (ICV), a SHA-256 hash chained to its
+predecessor (PIH), and a Base64 TLV QR payload. Once a Cryptographic Stamp
+Identifier is installed, it also produces an ECDSA P-256 signature inside a XAdES
+envelope, and the QR grows from six tags to nine.
 
-So state it plainly: **Phase 2 envelope, deliberately unsigned, not a certified
-integration.** Do not put this in front of a real taxpayer's invoices as it stands. The
-envelope was built so that signing is an addition rather than a rewrite, which is still
-true for anyone who picks the item up.
+Read the scope line carefully, because it is narrower than "compliant":
+
+- **Implemented and proven**: the signature verifies against its certificate over a
+  `SignedInfo` rebuilt independently by the test; the DER walk that extracts the
+  issuer signature is checked against a signature that verifies; the counter stays
+  gap-free under concurrent posting; the chain links back to the genesis hash; the
+  private key is AES-256-GCM at rest and never crosses to the browser in any form.
+- **Implemented, not proven**: that ZATCA's validator agrees. A CSID is issued only
+  to a named taxpayer after onboarding, so the tests sign with a self-signed P-256
+  certificate. No offline test can settle that question, and none here claims to.
+- **Known gap, stated rather than buried**: `canonicalise()` normalises line endings
+  and trailing whitespace. ZATCA specifies C14N 1.1, which needs a real XML parser.
+  Our digest is deterministic, which is what the hash chain requires — but a
+  deployment submitting to production needs a C14N 1.1 implementation, and
+  `zatca-crypto.ts` marks the seam where it goes.
+
+So state it plainly: **a correct, signed Phase 2 envelope and a working client, not a
+certified integration.** The onboarding round trip against ZATCA's compliance endpoint
+is what turns the second bullet into the first, and only a real taxpayer can run it.
 
 ---
 
