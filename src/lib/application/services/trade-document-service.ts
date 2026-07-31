@@ -6,6 +6,8 @@ import type { AuditContext } from '@/lib/infrastructure/audit/audit-logger';
 import { recordAudit } from '@/lib/infrastructure/audit/audit-logger';
 import { withTenantRead, withTransaction } from '@/lib/infrastructure/db/prisma';
 import { allocateDocumentNumber } from './numbering-service';
+import { evaluateApprovalGate } from './approval-rules-service';
+import type { DocumentFacts } from '@/lib/domain/approvals/rule-evaluator';
 
 /**
  * Quotations, sales orders, purchase orders and sales returns.
@@ -107,6 +109,7 @@ export const TRADE_DOCUMENTS: Record<TradeDocumentType, TradeDocumentDefinition>
 
 export const STATUS_LABELS_AR: Record<TradeDocumentStatus, string> = {
   DRAFT: 'مسودة',
+  PENDING_APPROVAL: 'بانتظار الاعتماد',
   CONFIRMED: 'مؤكَّد',
   COMPLETED: 'منفَّذ',
   CANCELLED: 'ملغى',
@@ -478,7 +481,12 @@ function lineTotal(line: TradeDocumentLineInput): {
 }
 
 const ALLOWED_TRANSITIONS: Record<TradeDocumentStatus, readonly TradeDocumentStatus[]> = {
+  // DRAFT → CONFIRMED is the request; the approval gate may divert it to PENDING_APPROVAL.
   DRAFT: ['CONFIRMED', 'CANCELLED'],
+  // Only the approval engine moves a held document, and only to CONFIRMED (all steps signed)
+  // or back to DRAFT (rejected, so it can be revised and resubmitted). A user cannot confirm
+  // their way past a hold — `setTradeDocumentStatus` refuses PENDING_APPROVAL as a source.
+  PENDING_APPROVAL: ['CONFIRMED', 'DRAFT', 'CANCELLED'],
   CONFIRMED: ['COMPLETED', 'CANCELLED'],
   COMPLETED: [],
   CANCELLED: [],
@@ -494,14 +502,24 @@ const ALLOWED_TRANSITIONS: Record<TradeDocumentStatus, readonly TradeDocumentSta
  */
 export async function setTradeDocumentStatus(input: {
   tenantId: string;
+  userId: string;
   audit: AuditContext;
   id: string;
   status: TradeDocumentStatus;
-}): Promise<Result<{ id: string; status: TradeDocumentStatus }, DomainError>> {
+}): Promise<Result<TradeStatusChange, DomainError>> {
   return withTransaction(async (tx) => {
     const document = await tx.tradeDocument.findFirst({
       where: { id: input.id, tenantId: input.tenantId },
-      select: { id: true, status: true, documentNumber: true, type: true },
+      select: {
+        id: true,
+        status: true,
+        documentNumber: true,
+        type: true,
+        subtotal: true,
+        taxAmount: true,
+        totalAmount: true,
+        lines: { select: { discountPercent: true } },
+      },
     });
 
     if (document === null) {
@@ -509,7 +527,35 @@ export async function setTradeDocumentStatus(input: {
     }
 
     if (document.status === input.status) {
-      return ok({ id: document.id, status: document.status });
+      return ok({
+        id: document.id,
+        status: document.status,
+        documentNumber: document.documentNumber,
+        held: null,
+      });
+    }
+
+    // A held document is released by the approval engine and by nothing else.
+    //
+    // Without this a user walks straight past the hold by calling confirm a second time: the
+    // gate below only runs on DRAFT → CONFIRMED, so a second call finds the document already
+    // PENDING_APPROVAL, skips the gate, and confirms a document sitting in somebody's inbox
+    // awaiting their signature. An integration test covers exactly that attempt.
+    //
+    // `decideApproval` does not come through here — it writes the release inside its own
+    // transaction, conditional on the document still being held, so a late approval cannot
+    // resurrect something that was cancelled meanwhile.
+    //
+    // Cancelling is the one move a person may still make: withdrawing your own request is not
+    // circumventing it.
+    if (document.status === 'PENDING_APPROVAL' && input.status !== 'CANCELLED') {
+      return err(
+        DomainErrors.validation(
+          `المستند ${document.documentNumber} موقوف بانتظار الاعتماد — لا يمكن تأكيده قبل صدور القرار.`,
+          'This document is awaiting approval and cannot be confirmed until a decision is recorded.',
+          'status',
+        ),
+      );
     }
 
     if (!ALLOWED_TRANSITIONS[document.status].includes(input.status)) {
@@ -522,9 +568,39 @@ export async function setTradeDocumentStatus(input: {
       );
     }
 
+    // ── The approval gate ────────────────────────────────────────────────
+    //
+    // Interception happens on *confirm*, not on create. A draft commits nothing and needs no
+    // approval; confirming is the act that binds the company to a counterparty, and it is
+    // also the point at which the numbers a rule asks about have stopped changing.
+    let effectiveStatus = input.status;
+    let held: { requestId: string; ruleNameAr: string; totalSteps: number } | null = null;
+
+    if (input.status === 'CONFIRMED' && document.status === 'DRAFT') {
+      const gate = await evaluateApprovalGate(tx, {
+        tenantId: input.tenantId,
+        entityType: 'TRADE_DOCUMENT',
+        entityId: document.id,
+        documentType: document.type,
+        facts: documentFacts(document),
+        requestedById: input.userId,
+      });
+
+      if (!gate.ok) return gate;
+
+      if (gate.value.held) {
+        effectiveStatus = 'PENDING_APPROVAL';
+        held = {
+          requestId: gate.value.requestId ?? '',
+          ruleNameAr: gate.value.ruleNameAr ?? '',
+          totalSteps: gate.value.totalSteps,
+        };
+      }
+    }
+
     await tx.tradeDocument.update({
       where: { id: document.id },
-      data: { status: input.status, updatedAt: new Date() },
+      data: { status: effectiveStatus, updatedAt: new Date() },
     });
 
     await recordAudit(
@@ -536,11 +612,52 @@ export async function setTradeDocumentStatus(input: {
         metadata: {
           documentNumber: document.documentNumber,
           from: document.status,
-          to: input.status,
+          to: effectiveStatus,
+          ...(held !== null ? { heldBy: held.ruleNameAr, requestId: held.requestId } : {}),
         },
       },
     );
 
-    return ok({ id: document.id, status: input.status });
+    return ok({
+      id: document.id,
+      status: effectiveStatus,
+      documentNumber: document.documentNumber,
+      held,
+    });
   });
+}
+
+export interface TradeStatusChange {
+  readonly id: string;
+  readonly status: TradeDocumentStatus;
+  readonly documentNumber: string;
+  /** Present when an approval rule diverted the confirm. */
+  readonly held: { requestId: string; ruleNameAr: string; totalSteps: number } | null;
+}
+
+/**
+ * The document reduced to the five numbers a rule can ask about.
+ *
+ * `MAX_LINE_DISCOUNT_PERCENT` is the largest discount on any single line, not the average and
+ * not a header discount — a rule about discounts is asking "did anyone give away more than X
+ * on anything", and an average hides exactly the line that would answer it.
+ */
+function documentFacts(document: {
+  subtotal: Prisma.Decimal;
+  taxAmount: Prisma.Decimal;
+  totalAmount: Prisma.Decimal;
+  lines: readonly { discountPercent: Prisma.Decimal }[];
+}): DocumentFacts {
+  const maxDiscount = document.lines.reduce(
+    (highest, line) => (line.discountPercent.greaterThan(highest) ? line.discountPercent : highest),
+    new Prisma.Decimal(0),
+  );
+
+  return {
+    TOTAL_AMOUNT: document.totalAmount.toString(),
+    SUBTOTAL: document.subtotal.toString(),
+    TAX_AMOUNT: document.taxAmount.toString(),
+    LINE_COUNT: String(document.lines.length),
+    MAX_LINE_DISCOUNT_PERCENT: maxDiscount.toString(),
+  };
 }

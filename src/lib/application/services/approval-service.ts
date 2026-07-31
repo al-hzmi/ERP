@@ -25,6 +25,16 @@ import { logger } from '@/lib/infrastructure/logging/logger';
  *   3. **A step is acted on once.** Not "the second click is ignored" — the second
  *      click is refused, because silently accepting it makes an approval count
  *      twice in the audit trail.
+ *
+ * ## Releasing the document (migration 013)
+ *
+ * A completed decision moves the held document in the *same transaction*. A separate commit
+ * could leave a fully approved request whose document is still held — and that state is
+ * invisible, because the request has left every inbox and nothing is watching it.
+ *
+ * Approval releases to CONFIRMED; rejection returns to DRAFT rather than cancelling, because
+ * "no" from a reviewer usually means "not like this", and DRAFT is where the lines unfreeze so
+ * it can be revised and resubmitted. Confirming it again re-runs the gate.
  */
 
 export interface PendingApproval {
@@ -40,6 +50,21 @@ export interface PendingApproval {
   readonly amount: string | null;
   readonly currency: string | null;
   readonly descriptionAr: string | null;
+  /**
+   * The rule that held this document, and the clauses that fired.
+   *
+   * An inbox that says only "approve this" asks the reviewer to trust that something,
+   * somewhere, decided it needed approving. Naming the rule and showing the numbers it
+   * matched is what makes the request arguable — the reviewer can see that the total was
+   * 62,000 against a 50,000 threshold and decide, rather than rubber-stamp.
+   */
+  readonly ruleNameAr: string | null;
+  readonly triggeredBy: {
+    readonly field: string;
+    readonly operator: string;
+    readonly threshold: string;
+    readonly actual: string;
+  }[];
 }
 
 /**
@@ -160,8 +185,10 @@ export async function listPendingApprovals(input: {
         currentStep: true,
         createdAt: true,
         requestedById: true,
+        triggeredBy: true,
         policy: {
           select: {
+            nameAr: true,
             steps: {
               select: { stepNumber: true, roleId: true, excludeInitiator: true },
               orderBy: { stepNumber: 'asc' },
@@ -201,8 +228,12 @@ export async function listPendingApprovals(input: {
     const journalIds = actionable
       .filter((request) => request.entityType === 'JOURNAL')
       .map((request) => request.entityId);
+    // Added by migration 013: the trade documents the approval gate holds.
+    const tradeIds = actionable
+      .filter((request) => request.entityType === 'TRADE_DOCUMENT')
+      .map((request) => request.entityId);
 
-    const [documents, journals] = await Promise.all([
+    const [documents, journals, trades] = await Promise.all([
       documentIds.length > 0
         ? tx.document.findMany({
             where: { id: { in: documentIds } },
@@ -220,14 +251,37 @@ export async function listPendingApprovals(input: {
             },
           })
         : Promise.resolve([]),
+      tradeIds.length > 0
+        ? tx.tradeDocument.findMany({
+            where: { id: { in: tradeIds } },
+            select: {
+              id: true,
+              documentNumber: true,
+              totalAmount: true,
+              currency: true,
+              notes: true,
+              counterparty: { select: { nameAr: true } },
+            },
+          })
+        : Promise.resolve([]),
     ]);
 
     const documentById = new Map(documents.map((document) => [document.id, document]));
     const journalById = new Map(journals.map((journal) => [journal.id, journal]));
+    const tradeById = new Map(trades.map((trade) => [trade.id, trade]));
 
     return actionable.map((request) => {
       const document = documentById.get(request.entityId);
       const journal = journalById.get(request.entityId);
+      const trade = tradeById.get(request.entityId);
+
+      // Stored as JSON, so it is `unknown` until proven otherwise. A malformed or absent
+      // value yields an empty list rather than throwing: the request is still actionable
+      // without its evidence, and an inbox that 500s because one row's audit blob is odd is
+      // worse than one that shows the row with no explanation.
+      const evidence = request.triggeredBy as
+        | { matched?: { field: string; operator: string; threshold: string; actual: string }[] }
+        | null;
 
       return {
         requestId: request.id,
@@ -237,10 +291,21 @@ export async function listPendingApprovals(input: {
         totalSteps: request.policy.steps.length,
         requestedAt: request.createdAt,
         requestedByName: requesterById.get(request.requestedById) ?? 'غير معروف',
-        reference: document?.documentNumber ?? journal?.entryNumber ?? null,
-        amount: document?.total.toString() ?? journal?.totalDebit.toString() ?? null,
-        currency: document?.currency ?? null,
-        descriptionAr: journal?.descriptionAr ?? document?.notes ?? null,
+        reference:
+          document?.documentNumber ?? journal?.entryNumber ?? trade?.documentNumber ?? null,
+        amount:
+          document?.total.toString() ??
+          journal?.totalDebit.toString() ??
+          trade?.totalAmount.toString() ??
+          null,
+        currency: document?.currency ?? trade?.currency ?? null,
+        descriptionAr:
+          journal?.descriptionAr ??
+          document?.notes ??
+          trade?.counterparty.nameAr ??
+          null,
+        ruleNameAr: request.policy.nameAr,
+        triggeredBy: Array.isArray(evidence?.matched) ? evidence.matched : [],
       };
     });
   });
@@ -392,6 +457,39 @@ export async function decideApproval(input: {
       },
       select: { status: true, currentStep: true },
     });
+
+    // ── Release the held document ────────────────────────────────────────
+    //
+    // In the same transaction as the decision, deliberately. A document released by a
+    // separate commit could be left held after a fully approved request — invisible, because
+    // the request is gone from every inbox and nothing is watching it any more.
+    //
+    // A rejection returns the document to DRAFT rather than cancelling it: "no" from a
+    // reviewer usually means "not like this", and DRAFT is the state in which the lines
+    // unfreeze so it can be revised and resubmitted. Cancelling would force a new document
+    // and lose the thread.
+    if (completed && request.entityType === 'TRADE_DOCUMENT') {
+      const released = await tx.tradeDocument.updateMany({
+        where: {
+          id: request.entityId,
+          tenantId: input.tenantId,
+          // Only a document still held. If somebody cancelled it while it sat in the inbox,
+          // the approval must not resurrect it.
+          status: 'PENDING_APPROVAL',
+        },
+        data: {
+          status: status === 'APPROVED' ? 'CONFIRMED' : 'DRAFT',
+          updatedAt: new Date(),
+        },
+      });
+
+      if (released.count === 0) {
+        logger.warn('Approval completed but no held document matched', {
+          requestId: request.id,
+          entityId: request.entityId,
+        });
+      }
+    }
 
     logger.info('Approval decision recorded', {
       requestId: request.id,

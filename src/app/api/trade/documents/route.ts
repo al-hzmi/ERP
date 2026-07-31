@@ -89,6 +89,7 @@ export const POST = apiHandler<TradeResult>(
     if (parsed.data.action === 'setStatus') {
       return setTradeDocumentStatus({
         tenantId: context.tenantId,
+        userId: context.userId,
         audit,
         id: parsed.data.id,
         status: parsed.data.status,

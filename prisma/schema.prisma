@@ -105,6 +105,7 @@ model Tenant {
   tradeDocumentLines    TradeDocumentLine[]
   assemblyOrders        AssemblyOrder[]
   assemblyOrderLines    AssemblyOrderLine[]
+  ApprovalRuleCondition ApprovalRuleCondition[]
 
   @@index([isActive])
   @@map("tenants")
@@ -1337,21 +1338,62 @@ model PayrollLine {
 //  BOUNDED CONTEXT: GOVERNANCE  (approval workflow, fixed assets)
 // ═════════════════════════════════════════════════════════════════════════════
 
+/// An approval rule: what it governs, when it fires, and who must sign.
+///
+/// `documentType` + `conditions` is the *when*; `steps` is the *who*. `minAmount` predates
+/// the condition rows and is kept as the fast path — see `rule-evaluator.ts` for how the two
+/// combine (both must hold, and `minAmount` defaults to 0, so a policy with only conditions
+/// behaves exactly as its conditions say).
 model ApprovalPolicy {
-  id           String  @id @default(uuid()) @db.Uuid
-  tenantId     String  @db.Uuid
-  /// Document type this policy governs, e.g. `SALES_INVOICE`, `PAYMENT`, `JOURNAL`.
-  documentType String  @db.VarChar(32)
+  id           String   @id @default(uuid()) @db.Uuid
+  tenantId     String   @db.Uuid
+  /// What an administrator recognises this rule by, and what the inbox names as the reason.
+  nameAr       String   @db.VarChar(128)
+  nameEn       String   @db.VarChar(128)
+  /// Document type this policy governs, e.g. `SALES_ORDER`, `PURCHASE_ORDER`, `SALES_INVOICE`.
+  documentType String   @db.VarChar(32)
   /// Policy only applies when the document total is at least this amount.
-  minAmount    Decimal @default(0) @db.Decimal(19, 4)
-  isActive     Boolean @default(true)
+  minAmount    Decimal  @default(0) @db.Decimal(19, 4)
+  /// Lower runs first. When several rules match one document the administrator decides which
+  /// is strictest — the amount cannot express that on its own.
+  priority     Int      @default(100)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
 
-  tenant   Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  steps    ApprovalStep[]
-  requests ApprovalRequest[]
+  tenant     Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  steps      ApprovalStep[]
+  requests   ApprovalRequest[]
+  conditions ApprovalRuleCondition[]
 
-  @@unique([tenantId, documentType, minAmount])
+  @@unique([tenantId, nameAr])
+  @@index([tenantId, documentType, priority])
   @@map("approval_policies")
+}
+
+/// One clause of a rule: a field of the document, a comparison, and a number.
+///
+/// A policy's conditions are **ANDed**. OR is expressed by writing a second policy, which also
+/// keeps the two reasons distinguishable in the audit trail — a request says which rule raised
+/// it, and "one of two unrelated clauses" would not be an answer.
+model ApprovalRuleCondition {
+  id        String                    @id @default(uuid()) @db.Uuid
+  /// Denormalised from the policy so this table carries a policy of its own; migration 009's
+  /// generic trigger refuses any row whose tenant disagrees with its parent's.
+  tenantId  String                    @db.Uuid
+  policyId  String                    @db.Uuid
+  field     ApprovalConditionField
+  operator  ApprovalConditionOperator
+  /// Scale 4, matching every money column. A percentage is stored as typed: 15, not 0.15.
+  value     Decimal                   @db.Decimal(19, 4)
+  createdAt DateTime                  @default(now()) @db.Timestamptz(6)
+
+  tenant Tenant         @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  policy ApprovalPolicy @relation(fields: [policyId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([policyId, field])
+  @@index([tenantId])
+  @@index([tenantId, policyId])
+  @@map("approval_rule_conditions")
 }
 
 model ApprovalStep {
@@ -1383,6 +1425,9 @@ model ApprovalRequest {
   currentStep   Int            @default(1)
   status        ApprovalStatus @default(PENDING)
   requestedById String         @db.Uuid
+  /// The facts that satisfied the rule at the instant it fired. Kept because both the rule
+  /// and the document can change afterwards, and without it the request cannot be explained.
+  triggeredBy   Json?
   createdAt     DateTime       @default(now()) @db.Timestamptz(6)
   completedAt   DateTime?      @db.Timestamptz(6)
 
@@ -1886,6 +1931,9 @@ enum TradeDocumentType {
 
 enum TradeDocumentStatus {
   DRAFT
+  /// Held by an approval rule. Lines are frozen — a document under review is precisely one
+  /// whose terms must not move under the reviewer.
+  PENDING_APPROVAL
   /// Agreed with the counterparty. Lines are frozen from here on.
   CONFIRMED
   /// Fulfilled — invoiced, delivered, or received. Terminal.
@@ -1897,4 +1945,22 @@ enum AssemblyStatus {
   DRAFT
   COMPLETED
   CANCELLED
+}
+
+enum ApprovalConditionField {
+  TOTAL_AMOUNT
+  SUBTOTAL
+  TAX_AMOUNT
+  LINE_COUNT
+  /// The largest per-line discount on the document, as a percentage.
+  MAX_LINE_DISCOUNT_PERCENT
+}
+
+enum ApprovalConditionOperator {
+  GT
+  GTE
+  LT
+  LTE
+  EQ
+  NEQ
 }

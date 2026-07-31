@@ -101,6 +101,10 @@ const TENANT_SCOPED_TABLES = [
   'trade_document_lines',
   'assembly_orders',
   'assembly_order_lines',
+  // Added by migration 013. A child of `approval_policies`, so it carries the denormalised
+  // tenant and migration 009's generic guard trigger — same arrangement as every other child
+  // table in the schema.
+  'approval_rule_conditions',
 ] as const;
 
 interface PolicyRow {

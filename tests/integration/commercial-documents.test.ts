@@ -508,6 +508,7 @@ describe.skipIf(databaseUrl === undefined || databaseUrl === '')('commercial doc
       await runInTenantScope({ tenantId }, () =>
         setTradeDocumentStatus({
           tenantId,
+          userId,
           audit: audit(),
           id: created.value.id,
           status: 'CONFIRMED',
@@ -539,6 +540,7 @@ describe.skipIf(databaseUrl === undefined || databaseUrl === '')('commercial doc
       const skipped = await runInTenantScope({ tenantId }, () =>
         setTradeDocumentStatus({
           tenantId,
+          userId,
           audit: audit(),
           id: created.value.id,
           status: 'COMPLETED',
@@ -549,6 +551,7 @@ describe.skipIf(databaseUrl === undefined || databaseUrl === '')('commercial doc
       await runInTenantScope({ tenantId }, () =>
         setTradeDocumentStatus({
           tenantId,
+          userId,
           audit: audit(),
           id: created.value.id,
           status: 'CANCELLED',
@@ -559,6 +562,7 @@ describe.skipIf(databaseUrl === undefined || databaseUrl === '')('commercial doc
       const revived = await runInTenantScope({ tenantId }, () =>
         setTradeDocumentStatus({
           tenantId,
+          userId,
           audit: audit(),
           id: created.value.id,
           status: 'CONFIRMED',
@@ -576,6 +580,7 @@ describe.skipIf(databaseUrl === undefined || databaseUrl === '')('commercial doc
       await runInTenantScope({ tenantId }, () =>
         setTradeDocumentStatus({
           tenantId,
+          userId,
           audit: audit(),
           id: created.value.id,
           status: 'CONFIRMED',

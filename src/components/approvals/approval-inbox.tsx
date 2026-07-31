@@ -35,12 +35,37 @@ interface PendingApproval {
   readonly amount: string | null;
   readonly currency: string | null;
   readonly descriptionAr: string | null;
+  readonly ruleNameAr: string | null;
+  readonly triggeredBy: readonly {
+    readonly field: string;
+    readonly operator: string;
+    readonly threshold: string;
+    readonly actual: string;
+  }[];
 }
 
 const ENTITY_LABELS: Record<string, string> = {
   DOCUMENT: 'مستند',
   JOURNAL: 'قيد محاسبي',
   PAYMENT: 'سند دفع',
+  TRADE_DOCUMENT: 'مستند تجاري',
+};
+
+const FIELD_LABELS: Record<string, string> = {
+  TOTAL_AMOUNT: 'إجمالي المستند',
+  SUBTOTAL: 'الصافي قبل الضريبة',
+  TAX_AMOUNT: 'قيمة الضريبة',
+  LINE_COUNT: 'عدد السطور',
+  MAX_LINE_DISCOUNT_PERCENT: 'أعلى نسبة خصم في سطر',
+};
+
+const OPERATOR_LABELS: Record<string, string> = {
+  GT: 'أكبر من',
+  GTE: 'أكبر من أو يساوي',
+  LT: 'أصغر من',
+  LTE: 'أصغر من أو يساوي',
+  EQ: 'يساوي',
+  NEQ: 'لا يساوي',
 };
 
 export function ApprovalInbox(): JSX.Element {
@@ -179,6 +204,45 @@ export function ApprovalInbox(): JSX.Element {
 
             {request.descriptionAr !== null && request.descriptionAr !== '' ? (
               <p className="text-sm text-muted-foreground">{request.descriptionAr}</p>
+            ) : null}
+
+            {/* Why this is here at all.
+
+                An inbox that says only "approve this" asks the reviewer to trust that
+                something, somewhere, decided it needed approving. Naming the rule and showing
+                the numbers it matched — 62,000 against a 50,000 threshold — is what makes the
+                request arguable instead of a rubber stamp.
+
+                The facts are the ones frozen when the rule fired, not recomputed now: the rule
+                may have been edited and the document revised since, and re-deriving them would
+                show a reason that was never the reason. */}
+            {request.ruleNameAr !== null ? (
+              <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+                  سبب الإيقاف
+                </p>
+                <p className="mt-0.5 text-xs font-medium">{request.ruleNameAr}</p>
+                {request.triggeredBy.length > 0 ? (
+                  <ul className="mt-1 space-y-0.5">
+                    {request.triggeredBy.map((clause) => (
+                      <li key={clause.field} className="text-[11px] text-muted-foreground">
+                        {FIELD_LABELS[clause.field] ?? clause.field}{' '}
+                        {OPERATOR_LABELS[clause.operator] ?? clause.operator}{' '}
+                        <span className="numeric">{clause.threshold}</span>
+                        {' — '}
+                        <span className="numeric font-medium text-foreground">
+                          {clause.actual}
+                        </span>{' '}
+                        فعلياً
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    القاعدة تنطبق على كل مستندات هذا النوع.
+                  </p>
+                )}
+              </div>
             ) : null}
 
             <Input

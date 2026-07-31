@@ -14,6 +14,7 @@ import type { AssemblyStatus, TradeDocumentStatus } from '@prisma/client';
 
 export const TRADE_STATUS_LABELS_AR: Record<TradeDocumentStatus, string> = {
   DRAFT: 'مسودة',
+  PENDING_APPROVAL: 'بانتظار الاعتماد',
   CONFIRMED: 'مؤكَّد',
   COMPLETED: 'منفَّذ',
   CANCELLED: 'ملغى',
@@ -21,9 +22,10 @@ export const TRADE_STATUS_LABELS_AR: Record<TradeDocumentStatus, string> = {
 
 export const TRADE_STATUS_TONES: Record<
   TradeDocumentStatus,
-  'neutral' | 'info' | 'success' | 'danger'
+  'neutral' | 'info' | 'success' | 'danger' | 'warning'
 > = {
   DRAFT: 'neutral',
+  PENDING_APPROVAL: 'warning',
   CONFIRMED: 'info',
   COMPLETED: 'success',
   CANCELLED: 'danger',

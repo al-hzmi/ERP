@@ -22,7 +22,7 @@ cp .env.example .env        # then set AUTH_SECRET and ENCRYPTION_KEY
 #    openssl rand -hex 32      -> ENCRYPTION_KEY
 
 # 3. Database (PostgreSQL 15+)
-npm run db:migrate          # applies all twelve migrations
+npm run db:migrate          # applies all thirteen migrations
 npm run db:seed             # generates and verifies a full demo company
 
 # 4. Run
@@ -43,7 +43,7 @@ it, `auditor` can read everything and change nothing.
 > database is reachable by anyone you did not invite.
 
 ```bash
-npm test           # 621 tests (368 unit + 253 integration)
+npm test           # 653 tests (385 unit + 268 integration)
 npm run typecheck  # strict TypeScript, no `any`, no `@ts-ignore`
 npm run build      # production build
 ```
@@ -114,18 +114,18 @@ src/
 └── styles/
 prisma/
 ├── schema.prisma             7 bounded contexts
-├── migrations/               12 migrations (see below)
+├── migrations/               13 migrations (see below)
 └── seed.ts + seed/           the data generator
 tests/
-├── unit/                     368 tests, no database required
-└── integration/              253 tests against real PostgreSQL
+├── unit/                     385 tests, no database required
+└── integration/              268 tests against real PostgreSQL
 ```
 
 Dependencies point inward. `domain/` imports nothing from `application/` or
 `infrastructure/`, which is why the entire accounting behaviour of the system is
 testable without a database.
 
-### The twelve migrations
+### The thirteen migrations
 
 1. **`20260101000000_init`** — the schema Prisma generates.
 2. **`20260101000001_partitioning_constraints_triggers`** — everything Prisma
@@ -181,6 +181,14 @@ testable without a database.
    those indexes. Four kinds of query returned *zero rows* against the seeded company before
    it: `١٠٣٨` (Arabic-Indic digits — self-inflicted, since the app prints them), `BTC1038`
    (the separator nobody types back), `الصفوه` for `الصفوة`, and `الافق` for `الأفق`.
+13. **`20260807000000_approval_rule_conditions`** — conditions on approval policies, and a
+   `PENDING_APPROVAL` status for the documents a rule holds. It *extends* `approval_policies`
+   rather than adding a parallel `approval_rules` table: that model is already a rule
+   (`documentType + minAmount` is a condition of fixed shape), and everything downstream — the
+   ordered steps, the one-request-per-entity constraint, the segregation-of-duties check, the
+   SERIALIZABLE decision path, the inbox — is written against a policy id. A second table
+   would have needed its own copy of all of it, and the two would drift on the only question
+   that matters: which one decides.
 
 Migration 4 installed the policies; making them *apply* took no further migration,
 only the application change that put every read path inside a tenant scope. See
@@ -285,6 +293,48 @@ by rows that outlive it and every foreign key is `ON DELETE RESTRICT`, so a dele
 would fail on exactly the records old enough to matter and succeed only on ones nobody would
 miss. The usage column is what makes deactivating the honest operation instead of a
 consolation prize.
+
+### The approval engine
+
+**Rules are configured, not coded.** `/system/approval-rules` builds one as a sentence — *أمر
+بيع، الإجمالي أكبر من 50,000، يعتمده المحاسب* — and the form restates it back before saving,
+because the failure mode of a rules engine is a rule that does something other than what its
+author believed.
+
+A rule is a document type, a set of conditions and an ordered chain of approver roles.
+Conditions are **ANDed**; OR is two rules, which also keeps the two reasons distinguishable
+since a request records the single rule that raised it. A rule with no conditions matches
+every document of its type — deliberate, and usually the first rule anybody writes.
+
+**The gate runs on confirm, not on create.** A draft commits nothing and needs no approval;
+confirming is the act that binds the company to a counterparty, and it is also the point where
+the numbers a rule asks about have stopped changing. Holding at create would put every
+half-typed order in somebody's inbox.
+
+When a rule matches, the document goes to `PENDING_APPROVAL` and a request appears in the
+inbox of the role the first step names. The document's lines are frozen — migration 011's
+trigger already freezes anything that is not DRAFT, and a document under review is precisely
+one whose terms must not move under the reviewer. Approval releases it to CONFIRMED; rejection
+returns it to DRAFT so it can be revised and resubmitted, which is why rejection does not
+cancel.
+
+**The evaluator is pure** (`domain/approvals/rule-evaluator.ts`): no database, no clock. Both
+sides of every comparison are scaled to `bigint` at four decimal places rather than parsed with
+`Number` — `0.1 + 0.2 > 0.3` is true in IEEE-754, and a `discount > 15` rule firing on a
+discount of exactly 15 is the kind of defect nobody thinks to look for. Seventeen unit tests
+cover the boundaries and the malformed input, because a rules engine fails by firing when it
+should not or by silently not firing when it should.
+
+**The inbox says why.** Each request names the rule and shows the numbers it matched — 88,320
+against a 50,000 threshold — from facts frozen on the request when it fired, not recomputed
+now. The rule may have been edited and the document revised since, and re-deriving them would
+show a reason that was never the reason. An inbox that only says "approve this" asks the
+reviewer to rubber-stamp.
+
+One hole worth recording, because a test caught it rather than a review: `PENDING_APPROVAL →
+CONFIRMED` is a legal transition (the engine needs it), and the gate only runs on `DRAFT →
+CONFIRMED` — so a user could confirm a held document a second time and walk straight past the
+hold. `setTradeDocumentStatus` now refuses any move out of `PENDING_APPROVAL` except cancelling.
 
 ### The command palette
 

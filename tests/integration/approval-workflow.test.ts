@@ -60,6 +60,11 @@ async function createPolicy(minAmount = '0'): Promise<string> {
   const policy = await prisma.approvalPolicy.create({
     data: {
       tenantId,
+      // Names became required in migration 013, where a policy grew into a named rule the
+      // approvals inbox can point at. Randomised so repeated runs do not collide on the
+      // (tenantId, nameAr) unique index.
+      nameAr: `قاعدة ${minAmount}-${randomUUID().slice(0, 6)}`,
+      nameEn: `Rule ${minAmount}`,
       documentType: 'SALES_INVOICE',
       minAmount,
       steps: {
@@ -200,6 +205,8 @@ describe.skipIf(databaseUrl === undefined || databaseUrl === '')('approval workf
       const strict = await prisma.approvalPolicy.create({
         data: {
           tenantId,
+          nameAr: 'قاعدة SALES_INVOICE 1000',
+          nameEn: 'SALES_INVOICE over 1000',
           documentType: 'SALES_INVOICE',
           minAmount: '1000',
           steps: {
@@ -224,7 +231,13 @@ describe.skipIf(databaseUrl === undefined || databaseUrl === '')('approval workf
 
     it('refuses a policy with no steps rather than creating an unactionable request', async () => {
       await prisma.approvalPolicy.create({
-        data: { tenantId, documentType: 'SALES_INVOICE', minAmount: '0' },
+        data: {
+          tenantId,
+          nameAr: `بلا خطوات ${randomUUID().slice(0, 6)}`,
+          nameEn: 'No steps',
+          documentType: 'SALES_INVOICE',
+          minAmount: '0',
+        },
       });
 
       const result = await runInTenantScope({ tenantId }, () =>

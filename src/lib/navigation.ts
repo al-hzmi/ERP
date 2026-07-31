@@ -446,7 +446,12 @@ export const NAVIGATION: readonly NavModule[] = [
             labelEn: 'Branches & Warehouses',
             icon: Building2,
           },
-          { labelAr: 'سياسات الاعتماد', labelEn: 'Approval Policies', icon: ClipboardCheck },
+          {
+            href: '/system/approval-rules',
+            labelAr: 'قواعد الموافقات',
+            labelEn: 'Approval Rules',
+            icon: ClipboardCheck,
+          },
           { labelAr: 'إعدادات الضرائب', labelEn: 'Tax Settings', icon: Percent },
           { labelAr: 'تسلسل الترقيم', labelEn: 'Number Sequences', icon: ListTree },
         ],
