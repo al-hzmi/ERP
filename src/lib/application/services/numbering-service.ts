@@ -180,3 +180,72 @@ export async function allocateInvoiceCounterValue(
 
   return value;
 }
+
+export interface NumberSeriesRow {
+  readonly key: string;
+  readonly labelAr: string;
+  readonly year: number;
+  readonly prefix: string;
+  readonly padding: number;
+  /** The number the next document will take. Read, never written from a screen — see below. */
+  readonly nextValue: string;
+  readonly sample: string;
+  readonly issued: bigint;
+}
+
+const SERIES_LABELS_AR: Record<string, string> = {
+  SALES_INVOICE: 'فواتير المبيعات',
+  PURCHASE_INVOICE: 'فواتير المشتريات',
+  SALES_CREDIT_NOTE: 'إشعارات دائنة',
+  PURCHASE_DEBIT_NOTE: 'إشعارات مدينة',
+  JOURNAL: 'قيود اليومية',
+  RECEIPT_VOUCHER: 'سندات القبض',
+  PAYMENT_VOUCHER: 'سندات الصرف',
+  INVENTORY_MOVEMENT: 'حركات المخزون',
+  STOCK_TRANSFER: 'التحويلات المخزنية',
+  PAYROLL_RUN: 'مسيّرات الرواتب',
+  FIXED_ASSET: 'الأصول الثابتة',
+  QUOTATION: 'عروض الأسعار',
+  SALES_ORDER: 'أوامر البيع',
+  PURCHASE_ORDER: 'أوامر الشراء',
+  SALES_RETURN: 'مرتجعات المبيعات',
+  ASSEMBLY_ORDER: 'أوامر التجميع',
+  ZATCA_ICV: 'عدّاد الفوترة الإلكترونية (ICV)',
+};
+
+/**
+ * Every series this tenant has drawn a number from, with where each one stands.
+ *
+ * Read-only, and that is a design decision rather than an unfinished screen. A counter that a
+ * user can set is a counter that can be set *backwards*, and the next allocation would then
+ * collide with a document that already exists — the unique index would refuse the write, but
+ * only after the accounting entries had been prepared. Worse, setting it forwards silently
+ * creates the gap an auditor reads as a deleted invoice.
+ *
+ * The prefix and padding are cosmetic and could safely be editable; they are not exposed yet
+ * because changing them mid-year produces two visually different numbering schemes in one
+ * series, which is the kind of thing a tenant should decide deliberately rather than discover.
+ */
+export async function listNumberSequences(
+  tx: TransactionClient,
+  tenantId: string,
+): Promise<NumberSeriesRow[]> {
+  const rows = await tx.numberSequence.findMany({
+    where: { tenantId },
+    select: { key: true, year: true, prefix: true, padding: true, nextValue: true },
+    orderBy: [{ key: 'asc' }, { year: 'desc' }],
+  });
+
+  return rows.map((row) => ({
+    key: row.key,
+    labelAr: SERIES_LABELS_AR[row.key] ?? row.key,
+    year: row.year,
+    prefix: row.prefix,
+    padding: row.padding,
+    nextValue: row.nextValue.toString(),
+    sample: `${row.prefix}-${row.year}-${row.nextValue.toString().padStart(row.padding, '0')}`,
+    // `nextValue` starts at 1, so the count issued is one less. A tenant that has never used a
+    // series has no row at all and does not appear here.
+    issued: row.nextValue - 1n,
+  }));
+}

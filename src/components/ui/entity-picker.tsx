@@ -6,23 +6,53 @@ import { apiFetch } from '@/lib/utils/api-client';
 import { cn } from '@/lib/utils/cn';
 
 /**
- * A search-as-you-type picker over an entity the tenant has thousands of.
+ * A picker over an entity the tenant has thousands of: a dropdown that also searches.
  *
  * A `<select>` is the right control for eight branches and the wrong one for five
  * thousand products, so this is the other half of that decision: it queries
  * `/api/search`, which already ranks exact over prefix over substring over trigram,
  * meaning typing `1001` finds `BTC-1001` and a typo still finds the product.
  *
- * Two things it does that a naive version does not:
+ * ## It opens on focus, and that was a real defect
+ *
+ * It used to render nothing at all until the user typed. Clicking the field did
+ * visibly nothing — no list, no hint, no spinner — so the honest reading from the
+ * other side of the screen was that the form was broken, and that is exactly how it
+ * was reported. A control that looks like a dropdown must behave like one: click it
+ * and the first page of the list appears; type and it narrows.
+ *
+ * That is why `/api/search` now treats an empty `q` as browse rather than as "no
+ * results". The fix could not live in this component alone: an empty query returning
+ * `[]` from the server would still render an empty box.
+ *
+ * ## Three other things it does that a naive version does not
  *
  *   - **Debounces, and discards stale answers.** Without the second part, typing
  *     `ورق` then `ورقة` can render the results for `ورق` if they arrive later — the
- *     race is invisible on a fast connection and constant on a slow one.
+ *     race is invisible on a fast connection and constant on a slow one. Browse is
+ *     *not* debounced, because there is nothing to wait for: the user has stopped.
  *   - **Keeps the chosen label after the list closes.** A picker that shows an id, or
  *     goes blank once dismissed, makes the user re-search to check what they picked.
+ *   - **Says why the list is empty.** "لا توجد نتائج" after typing means no match;
+ *     the same words on an untouched field mean the tenant has no such records yet,
+ *     which is a different problem with a different fix, so it says so.
  */
 
 export type PickerEntity = 'product' | 'counterparty' | 'account';
+
+/**
+ * What an empty *browse* means, per entity.
+ *
+ * Reached only when the tenant genuinely has no such records — the picker asked for the first
+ * page of the list and the list is empty. Saying "no results" here would send someone hunting
+ * for a spelling mistake in a query they never typed; the fix is to create the record, and the
+ * message says where.
+ */
+const EMPTY_LABELS: Record<PickerEntity, string> = {
+  product: 'لا توجد أصناف مُسجَّلة بعد. أضِف صنفاً من «المخزون ← الأصناف».',
+  counterparty: 'لا يوجد عملاء أو موردون مُسجَّلون بعد. أضِفهم من «المبيعات ← العملاء».',
+  account: 'لا توجد حسابات في دليل الحسابات بعد.',
+};
 
 interface SearchHit {
   readonly entity: string;
@@ -34,6 +64,13 @@ interface SearchHit {
 
 export interface EntityPickerProps {
   entity: PickerEntity;
+  /**
+   * Which side of the trade a counterparty picker offers.
+   *
+   * Without it a sales invoice offers suppliers, and choosing one raises a receivable against
+   * a company you owe money to — a mistake the form cannot detect afterwards.
+   */
+  counterpartyType?: 'CUSTOMER' | 'SUPPLIER';
   value: string;
   /** The label to show for an already-chosen value, so it survives a remount. */
   valueLabel?: string;
@@ -47,6 +84,7 @@ export interface EntityPickerProps {
 
 export function EntityPicker({
   entity,
+  counterpartyType,
   value,
   valueLabel,
   onSelect,
@@ -60,40 +98,55 @@ export function EntityPicker({
   const [hits, setHits] = useState<readonly SearchHit[]>([]);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [failed, setFailed] = useState(false);
   const [highlighted, setHighlighted] = useState(0);
   const containerRef = useRef<HTMLDivElement>(null);
 
+  const query = term.trim();
+  const browsing = query === '';
+
   useEffect(() => {
-    const query = term.trim();
-    if (query === '') {
-      setHits([]);
-      setLoading(false);
-      return;
-    }
+    // Nothing is fetched while the list is shut. Opening is what asks the question, so a
+    // picker sitting on a form nobody has touched costs no requests at all.
+    if (!open) return;
 
     setLoading(true);
+    setFailed(false);
+
     // `cancelled` is the discard: a response that arrives after the term moved on is
     // an answer to a question nobody is asking any more.
     let cancelled = false;
 
-    const timer = setTimeout(() => {
-      void apiFetch<{ query: string; results: SearchHit[] }>(
-        `/api/search?q=${encodeURIComponent(query)}&entities=${entity}`,
-      ).then((result) => {
-        if (cancelled) return;
-        setLoading(false);
-        // The endpoint is federated and returns every permitted entity type ranked
-        // together; a picker wants one of them.
-        setHits(result.ok ? result.data.results.filter((hit) => hit.entity === entity) : []);
-        setHighlighted(0);
-      });
-    }, 250);
+    const params = new URLSearchParams({ q: query, entities: entity });
+    if (entity === 'counterparty' && counterpartyType !== undefined) {
+      params.set('counterpartyType', counterpartyType);
+    }
+
+    // Browse fires immediately; a typed query waits for the user to pause. Debouncing the
+    // browse would leave the dropdown blank for a quarter second after every click, which
+    // reads as the same unresponsiveness this component was fixed for.
+    const timer = setTimeout(
+      () => {
+        void apiFetch<{ query: string; results: SearchHit[] }>(
+          `/api/search?${params.toString()}`,
+        ).then((result) => {
+          if (cancelled) return;
+          setLoading(false);
+          setFailed(!result.ok);
+          // The endpoint is federated and returns every permitted entity type ranked
+          // together; a picker wants one of them.
+          setHits(result.ok ? result.data.results.filter((hit) => hit.entity === entity) : []);
+          setHighlighted(0);
+        });
+      },
+      browsing ? 0 : 250,
+    );
 
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [term, entity]);
+  }, [query, entity, open, browsing, counterpartyType]);
 
   // A click anywhere else closes the list. Without this the results stay open behind
   // the next field the user moves to.
@@ -194,17 +247,36 @@ export function EntityPicker({
         </div>
       )}
 
-      {open && !chosen && term.trim() !== '' ? (
+      {open && !chosen ? (
         <ul
           role="listbox"
-          className="absolute z-20 mt-1 max-h-64 w-full overflow-auto rounded-md border border-border bg-popover shadow-lg"
+          className="absolute z-20 mt-1 max-h-64 w-full overflow-auto rounded-md border border-border bg-popover shadow-lg duration-100 animate-in fade-in slide-in-from-top-1"
         >
           {loading && hits.length === 0 ? (
-            <li className="px-3 py-2 text-xs text-muted-foreground">جارٍ البحث…</li>
+            <li className="px-3 py-2 text-xs text-muted-foreground">
+              {browsing ? 'جارٍ التحميل…' : 'جارٍ البحث…'}
+            </li>
           ) : null}
 
-          {!loading && hits.length === 0 ? (
-            <li className="px-3 py-2 text-xs text-muted-foreground">لا توجد نتائج</li>
+          {/* Three different empty states, because they have three different fixes: the
+              request failed, the tenant has no such records, or the query matched none. A
+              single "لا توجد نتائج" for all three sends the user looking in the wrong place. */}
+          {!loading && failed ? (
+            <li className="px-3 py-2 text-xs text-destructive">
+              تعذّر تحميل القائمة. تحقّق من الاتصال وحاول مرة أخرى.
+            </li>
+          ) : null}
+
+          {!loading && !failed && hits.length === 0 ? (
+            <li className="px-3 py-2 text-xs text-muted-foreground">
+              {browsing ? EMPTY_LABELS[entity] : 'لا توجد نتائج مطابقة'}
+            </li>
+          ) : null}
+
+          {!loading && browsing && hits.length > 0 ? (
+            <li className="border-b border-border/60 px-3 py-1.5 text-[11px] text-muted-foreground">
+              اكتب للبحث في القائمة كاملة
+            </li>
           ) : null}
 
           {hits.map((hit, index) => (

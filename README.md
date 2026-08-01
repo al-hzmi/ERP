@@ -22,7 +22,7 @@ cp .env.example .env        # then set AUTH_SECRET and ENCRYPTION_KEY
 #    openssl rand -hex 32      -> ENCRYPTION_KEY
 
 # 3. Database (PostgreSQL 15+)
-npm run db:migrate          # applies all sixteen migrations
+npm run db:migrate          # applies all seventeen migrations
 npm run db:seed             # generates and verifies a full demo company
 
 # 4. Run
@@ -43,7 +43,7 @@ it, `auditor` can read everything and change nothing.
 > database is reachable by anyone you did not invite.
 
 ```bash
-npm test           # 749 tests (442 unit + 307 integration)
+npm test           # 783 tests (449 unit + 334 integration)
 npm run typecheck  # strict TypeScript, no `any`, no `@ts-ignore`
 npm run build      # production build
 ```
@@ -114,18 +114,18 @@ src/
 └── styles/
 prisma/
 ├── schema.prisma             7 bounded contexts
-├── migrations/               16 migrations (see below)
+├── migrations/               17 migrations (see below)
 └── seed.ts + seed/           the data generator
 tests/
-├── unit/                     442 tests, no database required
-└── integration/              307 tests against real PostgreSQL
+├── unit/                     449 tests, no database required
+└── integration/              334 tests against real PostgreSQL
 ```
 
 Dependencies point inward. `domain/` imports nothing from `application/` or
 `infrastructure/`, which is why the entire accounting behaviour of the system is
 testable without a database.
 
-### The sixteen migrations
+### The seventeen migrations
 
 1. **`20260101000000_init`** — the schema Prisma generates.
 2. **`20260101000001_partitioning_constraints_triggers`** — everything Prisma
@@ -206,6 +206,12 @@ testable without a database.
    invoice that was issued and then hidden. And the status lives on `zatca_invoices` rather
    than on `documents`: a purchase invoice would carry a meaningless column, and `documents`
    is the partitioned table every posting path writes.
+17. **`20260810000000_tax_codes`** — VAT treatments, replacing a free-text rate field. The rate
+   is not the treatment: zero-rated and exempt are both 0%, but a zero-rated supply belongs in
+   the VAT return and an exempt one does not, and ZATCA writes `Z` for one and `E` for the
+   other. A CHECK ties each treatment to its rate and to its ZATCA letter, a partial unique
+   index permits exactly one default per tenant, and the migration backfills the Saudi standard
+   set so an upgraded tenant does not open the invoice form to an empty dropdown.
 
 Migration 4 installed the policies; making them *apply* took no further migration,
 only the application change that put every read path inside a tenant scope. See
@@ -229,6 +235,7 @@ only the application change that put every read path inside a tenant scope. See
 | Concurrency | `application/services/inventory-service.ts` | Row locks taken *before* the read a decision depends on, so two concurrent sales of the last unit cannot both succeed |
 | Segregation of duties | `infrastructure/auth/segregation-of-duties.ts` | A conflict matrix over lifecycle steps, plus toxic-combination detection at role-assignment time |
 | Search | `application/services/search-service.ts` | Exact/prefix/substring/trigram combined into one SQL-side relevance score — typing `1001` finds `BTC-1001` |
+| Pickers that open | `components/ui/entity-picker.tsx` | Clicking shows the first page of the list, typing narrows it; an empty `q` is browse, not "no results" — and the three empty states say which of the three they are |
 | ZATCA envelope | `application/services/zatca-service.ts` | UBL 2.1 XML, gap-free invoice counter, SHA-256 chained to the predecessor, byte-correct Base64 TLV QR |
 | ZATCA cryptography | `domain/zatca/zatca-crypto.ts` | ECDSA P-256 over a XAdES `SignedInfo`, the certificate digest computed ZATCA's non-obvious way, and QR tags 7–9 carried as raw DER rather than double-encoded |
 | Outbox claiming | `infrastructure/events/event-bus.ts` | A claim written by the statement that takes the lock, so it outlives the transaction — dispatch then happens outside one, because handlers do I/O |
@@ -540,6 +547,38 @@ order entry. **IAS 2** — purchases are capitalised net of trade discount and
 excluding recoverable VAT; both FIFO and weighted average are supported.
 **IAS 21** — realised FX differences on settlement go to profit or loss
 immediately.
+
+### The invoice screen, and why it looked dead
+
+It was reported as unresponsive: clicking the customer field did nothing. It was not a client
+bug. `search()` returned `[]` for an empty query, so a picker that had been opened but not typed
+into had literally nothing to render — no list, no hint, no spinner. A control that looks like a
+dropdown and does nothing when clicked reads as a broken form, and that reading was correct.
+
+The fix could not live in the component: an empty query returning `[]` from the server would
+still render an empty box. So an empty `q` now means *browse* — the first page of the list,
+ordered by code, every row scoring 0 so the SQL-side ordering survives the merge. A query that
+is non-empty but matches nothing still returns nothing, which is the distinction that keeps
+browse safe.
+
+Two things were found while fixing it and are fixed here too. The customer picker offered
+suppliers, so a sales invoice could raise a receivable against a company the tenant owes money
+to; pickers now filter by side of the trade, using a `counterpartyKind` field that already
+existed on the trade-document definitions and had never been wired to anything. And the empty
+state said "لا توجد نتائج" whether the request had failed, the tenant had no records, or the
+query matched none — three different problems with three different fixes, now three different
+messages.
+
+### What was verified rather than rebuilt
+
+Two of the four things this release was asked for already existed and were already correct.
+Document numbering has been allocated inside a row lock since migration 1 — `SELECT max(…) + 1`
+would pass a sequential test and hand two concurrent invoices the same number — and posting a
+sales invoice has always written a balanced double entry. Rewriting either would have been
+churn, so they are pinned instead: `invoicing-v1.test.ts` races eight concurrent allocations and
+asserts eight distinct contiguous numbers, and the ledger assertion in `database-guards` now
+checks *which* accounts the entry hits and that no account appears on both sides — a
+balanced-only assertion cannot see an entry that debits and credits the same account.
 
 **ZATCA Phase 2** — every posted sales invoice produces a UUID, a UBL 2.1 XML
 document, a gap-free invoice counter (ICV), a SHA-256 hash chained to its

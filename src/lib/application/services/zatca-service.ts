@@ -229,6 +229,23 @@ export async function generateZatcaInvoice(
 }
 
 /**
+ * The ZATCA tax category letter for a line.
+ *
+ * `S` for a rated line, `Z` for a line at 0%. It used to be `S` unconditionally, which declares
+ * a 0% line to be standard-rated at zero — a contradiction ZATCA's validator rejects.
+ *
+ * `Z` rather than `E` is the deliberate choice for the ambiguous case. The invoice line carries
+ * only a rate, and 0% is both zero-rated and exempt; zero-rated is the larger category and the
+ * safer default, since declaring an exempt supply as zero-rated overstates the taxable base
+ * while the reverse understates it. Distinguishing them properly needs the tax *code* on the
+ * line, not just its rate — see `tax-code-service.ts`, which models that difference, and the
+ * note in the README about what carrying it onto `document_lines` would take.
+ */
+function zatcaCategoryFor(taxRate: string): 'S' | 'Z' {
+  return Number.parseFloat(taxRate) > 0 ? 'S' : 'Z';
+}
+
+/**
  * Inserts the signature extension and the QR node into the invoice.
  *
  * Both go in *after* the digest was taken, and both are excluded by the `SignedInfo`
@@ -331,7 +348,7 @@ function buildUblXml(input: UblInput): string {
       <cac:Item>
         <cbc:Name>${escapeXml(line.nameAr)}</cbc:Name>
         <cac:ClassifiedTaxCategory>
-          <cbc:ID>S</cbc:ID>
+          <cbc:ID>${escapeXml(zatcaCategoryFor(line.taxRate))}</cbc:ID>
           <cbc:Percent>${escapeXml(line.taxRate)}</cbc:Percent>
           <cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme>
         </cac:ClassifiedTaxCategory>

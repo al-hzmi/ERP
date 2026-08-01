@@ -23,6 +23,12 @@ export const GET = apiHandler(
     const query = url.searchParams.get('q') ?? '';
     const requested = url.searchParams.get('entities')?.split(',') ?? [];
 
+    // An empty `q` is browse mode, not an error: it is what a picker asks for when the user
+    // opens the dropdown without typing. It returns the first page of the list.
+    const rawType = url.searchParams.get('counterpartyType');
+    const counterpartyType =
+      rawType === 'CUSTOMER' || rawType === 'SUPPLIER' ? rawType : undefined;
+
     const permitted = ENTITIES.filter((entity) => {
       if (requested.length > 0 && !requested.includes(entity)) return false;
       switch (entity) {
@@ -52,6 +58,7 @@ export const GET = apiHandler(
       query,
       entities: permitted,
       limitPerEntity: 8,
+      ...(counterpartyType !== undefined ? { counterpartyType } : {}),
     });
 
     return ok({ query, results });

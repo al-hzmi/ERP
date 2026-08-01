@@ -80,6 +80,14 @@ export interface SearchOptions {
   readonly entities?: readonly SearchEntity[];
   readonly limitPerEntity?: number;
   readonly includeInactive?: boolean;
+  /**
+   * Narrows a counterparty search to one side of the trade.
+   *
+   * Without it a sales invoice's customer picker offers suppliers, and picking one produces a
+   * receivable against a company you owe money to. `BOTH` counterparties satisfy either filter,
+   * because they genuinely are both.
+   */
+  readonly counterpartyType?: 'CUSTOMER' | 'SUPPLIER';
 }
 
 /** Below this, a trigram match is noise rather than a suggestion. */
@@ -94,7 +102,6 @@ const SIMILARITY_FLOOR = 0.2;
  */
 export async function search(options: SearchOptions): Promise<SearchHit[]> {
   const term = options.query.trim();
-  if (term.length < 1) return [];
 
   const entities = options.entities ?? [
     'product',
@@ -106,9 +113,14 @@ export async function search(options: SearchOptions): Promise<SearchHit[]> {
   const limit = options.limitPerEntity ?? 8;
 
   const results = await Promise.all(
-    entities.map((entity) => searchEntity(prisma, entity, term, options.tenantId, limit, options.includeInactive ?? false)),
+    entities.map((entity) =>
+      searchEntity(prisma, entity, term, options.tenantId, limit, options.includeInactive ?? false, options.counterpartyType),
+    ),
   );
 
+  // Browsing returns every row at score 0, so the score sort is a no-op and the per-entity
+  // `ORDER BY code` survives. Sorting would otherwise shuffle an alphabetical list into an
+  // arbitrary one, which is worse than useless in a dropdown someone is scanning.
   return results
     .flat()
     .sort((a, b) => b.score - a.score)
@@ -122,12 +134,13 @@ async function searchEntity(
   tenantId: string,
   limit: number,
   includeInactive: boolean,
+  counterpartyType?: 'CUSTOMER' | 'SUPPLIER',
 ): Promise<SearchHit[]> {
   switch (entity) {
     case 'product':
       return searchProducts(db, term, tenantId, limit, includeInactive);
     case 'counterparty':
-      return searchCounterparties(db, term, tenantId, limit, includeInactive);
+      return searchCounterparties(db, term, tenantId, limit, includeInactive, counterpartyType);
     case 'account':
       return searchAccounts(db, term, tenantId, limit, includeInactive);
     case 'document':
@@ -181,6 +194,10 @@ function ladder(
   nameEnColumn: Prisma.Sql,
   term: string,
 ): Prisma.Sql {
+  // Browse mode has nothing to score against. Returning a constant 0 keeps every row equal so
+  // the query's own `ORDER BY code` decides the order.
+  if (term.trim() === '') return Prisma.sql`0`;
+
   const normalized = normalizeSearchTerm(term);
   const code = compactCode(term);
 
@@ -219,6 +236,12 @@ function matchClause(
   codeColumns: readonly Prisma.Sql[],
   textColumns: readonly Prisma.Sql[],
 ): Prisma.Sql {
+  // An *empty* term is browse mode: the user opened the dropdown without typing, and the
+  // honest answer is "here is the start of the list", not "no results". A term that is
+  // non-empty but tokenises to nothing (pure punctuation) still yields `false` — that is a
+  // query which matched nothing, and pretending it matched everything would be a lie.
+  if (term.trim() === '') return Prisma.sql`true`;
+
   const tokens = tokenize(term);
   if (tokens.length === 0) return Prisma.sql`false`;
 
@@ -293,7 +316,31 @@ async function searchCounterparties(
   tenantId: string,
   limit: number,
   includeInactive: boolean,
+  counterpartyType?: 'CUSTOMER' | 'SUPPLIER',
 ): Promise<SearchHit[]> {
+  // The extra clauses below compare against `compactCode(term)`, which is `''` when browsing —
+  // and `erp_compact_code(c."taxNumber") = ''` is true for every counterparty without a tax
+  // number, scoring them 1.00 and floating them to the top of an alphabetical list. So browse
+  // mode skips the scoring entirely rather than trying to make each clause empty-safe.
+  const scoring = term.trim() === ''
+    ? Prisma.sql`0`
+    : Prisma.sql`GREATEST(
+             ${scoreExpression(Prisma.sql`c."code"`, Prisma.sql`c."nameAr"`, Prisma.sql`c."nameEn"`, term)},
+             CASE WHEN erp_compact_code(c."taxNumber") = ${compactCode(term)}                 THEN 1.00 ELSE 0 END,
+             CASE WHEN erp_compact_code(c."phone")     = ${compactCode(term)}                 THEN 1.00 ELSE 0 END,
+             CASE WHEN erp_compact_code(c."phone")     LIKE ${compactCode(term) + '%'}        THEN 0.82 ELSE 0 END,
+             CASE WHEN erp_compact_code(c."taxNumber") LIKE ${compactCode(term) + '%'}        THEN 0.82 ELSE 0 END,
+             CASE WHEN erp_normalize_search(c."email") LIKE ${'%' + normalizeSearchTerm(term) + '%'} THEN 0.72 ELSE 0 END,
+             CASE WHEN erp_compact_code(c."phone")     LIKE ${'%' + compactCode(term) + '%'}  THEN 0.66 ELSE 0 END,
+             CASE WHEN erp_compact_code(c."taxNumber") LIKE ${'%' + compactCode(term) + '%'}  THEN 0.64 ELSE 0 END
+           )`;
+
+  // `BOTH` is a customer as much as it is a supplier, so it satisfies either filter.
+  const typeClause =
+    counterpartyType === undefined
+      ? Prisma.sql`TRUE`
+      : Prisma.sql`c."type" IN (${counterpartyType}::"CounterpartyType", 'BOTH')`;
+
   const rows = await db.$queryRaw<
     {
       id: string;
@@ -306,23 +353,11 @@ async function searchCounterparties(
     }[]
   >`
     SELECT c."id", c."code", c."nameAr", c."nameEn", c."phone", c."type"::text AS type,
-           GREATEST(
-             ${scoreExpression(Prisma.sql`c."code"`, Prisma.sql`c."nameAr"`, Prisma.sql`c."nameEn"`, term)},
-             -- An exact tax or phone number is strong evidence; a short substring
-             -- of a 15-digit VAT number is weak, and must not outrank a genuine
-             -- code match. Someone typing "1001" wants BTC-1001, not the customer
-             -- whose VAT registration happens to contain those digits.
-             CASE WHEN erp_compact_code(c."taxNumber") = ${compactCode(term)}                 THEN 1.00 ELSE 0 END,
-             CASE WHEN erp_compact_code(c."phone")     = ${compactCode(term)}                 THEN 1.00 ELSE 0 END,
-             CASE WHEN erp_compact_code(c."phone")     LIKE ${compactCode(term) + '%'}        THEN 0.82 ELSE 0 END,
-             CASE WHEN erp_compact_code(c."taxNumber") LIKE ${compactCode(term) + '%'}        THEN 0.82 ELSE 0 END,
-             CASE WHEN erp_normalize_search(c."email") LIKE ${'%' + normalizeSearchTerm(term) + '%'} THEN 0.72 ELSE 0 END,
-             CASE WHEN erp_compact_code(c."phone")     LIKE ${'%' + compactCode(term) + '%'}  THEN 0.66 ELSE 0 END,
-             CASE WHEN erp_compact_code(c."taxNumber") LIKE ${'%' + compactCode(term) + '%'}  THEN 0.64 ELSE 0 END
-           )::float8 AS score
+           ${scoring}::float8 AS score
       FROM "counterparties" c
      WHERE c."tenantId" = ${tenantId}::uuid
        AND (${includeInactive} OR c."isActive")
+       AND ${typeClause}
        AND ${matchClause(
          term,
          // Phone and VAT numbers are codes: nobody types a phone number's spacing back.

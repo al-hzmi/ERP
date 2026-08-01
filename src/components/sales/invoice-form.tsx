@@ -34,12 +34,32 @@ import {
  * ZATCA hash chain — it is not a save.
  */
 
+interface TaxCodeOption {
+  readonly id: string;
+  readonly code: string;
+  readonly nameAr: string;
+  /** Percent as an exact string, e.g. `"15.00"`. */
+  readonly rate: string;
+  readonly treatment: string;
+  readonly isDefault: boolean;
+}
+
 interface FormOptions {
   readonly branches: { id: string; code: string; nameAr: string }[];
   readonly warehouses: { id: string; code: string; nameAr: string; branchId: string }[];
   readonly currencies: { code: string; nameAr: string; minorUnits: number }[];
+  readonly taxCodes: TaxCodeOption[];
   readonly functionalCurrency: string;
 }
+
+/**
+ * The rate a line starts at before the tenant's tax codes have loaded.
+ *
+ * Replaced by the tenant's default the moment `/api/master-data/form-options` answers. It is a
+ * constant rather than an empty string because a blank rate box on a form that has not finished
+ * loading reads as a broken field, and this release is about exactly that impression.
+ */
+const FALLBACK_TAX_RATE = '15';
 
 let nextLineId = 0;
 function blankLine(): DraftLine {
@@ -50,9 +70,14 @@ function blankLine(): DraftLine {
     quantity: '1',
     unitPrice: '',
     discount: '',
-    taxRate: '15',
+    taxRate: FALLBACK_TAX_RATE,
     descriptionAr: '',
   };
+}
+
+/** `15.00` → `15`, `0.00` → `0`. The API's rate regex allows both; the shorter one reads. */
+function trimRate(rate: string): string {
+  return rate.replace(/\.00$/, '');
 }
 
 function today(): string {
@@ -144,10 +169,42 @@ export function InvoiceForm(): JSX.Element {
       }
       setOptions(result.data);
       setCurrency(result.data.functionalCurrency);
+
+      // Apply the tenant's default rate to lines the user has not touched. `blankLine()`
+      // cannot do this itself — it runs before the fetch resolves — so the correction happens
+      // here, and only for rows still holding the placeholder.
+      const fallbackDefault = result.data.taxCodes.find((code) => code.isDefault);
+      if (fallbackDefault !== undefined) {
+        setLines((current) =>
+          current.map((line) =>
+            line.taxRate === FALLBACK_TAX_RATE
+              ? { ...line, taxRate: trimRate(fallbackDefault.rate) }
+              : line,
+          ),
+        );
+      }
       // One branch is not a choice; preselecting it saves a click on every invoice.
       if (result.data.branches.length === 1) setBranchId(result.data.branches[0]?.id ?? '');
     });
   }, []);
+
+  /**
+   * The tax dropdown's entries.
+   *
+   * Keyed by *rate*, not by tax-code id, because the rate is what the API accepts and what the
+   * calculator multiplies by. Two codes at the same rate would collide, so the label carries
+   * the code's name and the value stays the number the posting path already understands —
+   * changing the wire format would mean changing the calculator, the API schema and the ZATCA
+   * builder together, which is a larger change than this defect warrants.
+   */
+  const taxRateOptions = useMemo(
+    () =>
+      (options?.taxCodes ?? []).map((taxCode) => ({
+        value: trimRate(taxCode.rate),
+        label: `${taxCode.nameAr} (${trimRate(taxCode.rate)}%)`,
+      })),
+    [options],
+  );
 
   // Warehouses belong to branches. Offering all of them lets a user file a Riyadh
   // invoice against a Jeddah warehouse, which the stock movement would then honour.
@@ -277,9 +334,13 @@ export function InvoiceForm(): JSX.Element {
           >
             <EntityPicker
               entity="counterparty"
+              // A sales invoice's customer, not any trading partner: without this the list
+              // offers suppliers, and choosing one raises a receivable against a company we
+              // owe money to.
+              counterpartyType="CUSTOMER"
               value={counterpartyId}
               valueLabel={counterpartyLabel}
-              placeholder="ابحث باسم العميل أو رمزه…"
+              placeholder="اختر العميل أو ابحث بالاسم/الرمز…"
               onSelect={(selection) => {
                 setCounterpartyId(selection.id);
                 setCounterpartyLabel(
@@ -395,7 +456,7 @@ export function InvoiceForm(): JSX.Element {
                       entity="product"
                       value={line.productId}
                       valueLabel={productLabels[line.productId]}
-                      placeholder="ابحث بالرمز أو الاسم…"
+                      placeholder="اختر الصنف أو ابحث بالرمز/الاسم…"
                       onSelect={(selection) => {
                         updateLine(line.id, { productId: selection.id });
                         if (selection.id !== '') {
@@ -436,13 +497,27 @@ export function InvoiceForm(): JSX.Element {
                     />
                   </td>
                   <td>
-                    <Input
-                      numeric
-                      inputMode="decimal"
-                      value={line.taxRate}
-                      onChange={(event) => updateLine(line.id, { taxRate: event.target.value })}
-                      aria-label={`نسبة الضريبة للبند ${index + 1}`}
-                    />
+                    {/* A dropdown of the tenant's VAT treatments rather than a free-text
+                        percentage. Typing `0` used to be the only way to express an export,
+                        which conflates zero-rated with exempt — different lines of the VAT
+                        return and different ZATCA category letters. Until the codes load it
+                        stays a text box, so the field is never disabled or blank. */}
+                    {options === null || options.taxCodes.length === 0 ? (
+                      <Input
+                        numeric
+                        inputMode="decimal"
+                        value={line.taxRate}
+                        onChange={(event) => updateLine(line.id, { taxRate: event.target.value })}
+                        aria-label={`نسبة الضريبة للبند ${index + 1}`}
+                      />
+                    ) : (
+                      <Select
+                        value={line.taxRate}
+                        onChange={(event) => updateLine(line.id, { taxRate: event.target.value })}
+                        aria-label={`المعالجة الضريبية للبند ${index + 1}`}
+                        options={taxRateOptions}
+                      />
+                    )}
                   </td>
                   <td>
                     <Button

@@ -466,8 +466,18 @@ export const NAVIGATION: readonly NavModule[] = [
             labelEn: 'ZATCA E-Invoicing',
             icon: QrCode,
           },
-          { labelAr: 'إعدادات الضرائب', labelEn: 'Tax Settings', icon: Percent },
-          { labelAr: 'تسلسل الترقيم', labelEn: 'Number Sequences', icon: ListTree },
+          {
+            href: '/system/tax-codes',
+            labelAr: 'إعدادات الضرائب',
+            labelEn: 'Tax Settings',
+            icon: Percent,
+          },
+          {
+            href: '/system/number-sequences',
+            labelAr: 'تسلسل الترقيم',
+            labelEn: 'Number Sequences',
+            icon: ListTree,
+          },
         ],
       },
       {

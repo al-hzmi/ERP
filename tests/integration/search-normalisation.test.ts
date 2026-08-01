@@ -240,8 +240,23 @@ describe.skipIf(databaseUrl === undefined || databaseUrl === '')('search normali
       expect(hits).toEqual([]);
     });
 
-    it('returns nothing for an empty query', async () => {
-      expect(await search({ tenantId, query: '   ', entities: ['product'] })).toEqual([]);
+    it('browses rather than returning nothing for an empty query', async () => {
+      // This assertion used to be `toEqual([])`, and that contract was the defect behind
+      // "the invoice screen does not respond": a picker opened but not typed into asked for
+      // an empty query, got nothing, and rendered an empty box. An empty query now means
+      // "show me the start of the list", which is what a dropdown is expected to do.
+      const browsed = await search({ tenantId, query: '   ', entities: ['product'] });
+
+      expect(browsed.length).toBeGreaterThan(0);
+      // Everything scores 0 when browsing, so the SQL-side `ORDER BY sku` survives.
+      expect(browsed.every((hit) => hit.score === 0)).toBe(true);
+    });
+
+    it('still returns nothing for a query that is real but matches nothing', async () => {
+      // The distinction that keeps browse mode safe. A term of pure punctuation tokenises to
+      // nothing, and it must not widen to every row the way an empty term deliberately does.
+      expect(await search({ tenantId, query: '...', entities: ['product'] })).toEqual([]);
+      expect(await search({ tenantId, query: 'zzzzzqqq', entities: ['product'] })).toEqual([]);
     });
   });
 });

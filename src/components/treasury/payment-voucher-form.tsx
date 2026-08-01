@@ -383,6 +383,9 @@ export function PaymentVoucherForm(): JSX.Element {
           >
             <EntityPicker
               entity="counterparty"
+              // A receipt collects from a customer, a payment settles with a supplier. Offering
+              // both on either voucher lets a receipt be booked against a supplier account.
+              counterpartyType={type === 'RECEIPT' ? 'CUSTOMER' : 'SUPPLIER'}
               value={counterpartyId}
               valueLabel={counterpartyLabel}
               onSelect={(selection) => {

@@ -113,6 +113,9 @@ const TENANT_SCOPED_TABLES = [
   // signing key, so a missing policy here would let one tenant read the cryptographic identity
   // another signs its invoices with.
   'zatca_configs',
+  // Added by migration 017. Rooted directly at `tenants`, so no guard trigger: there is no
+  // parent whose tenant its own could disagree with.
+  'tax_codes',
 ] as const;
 
 interface PolicyRow {

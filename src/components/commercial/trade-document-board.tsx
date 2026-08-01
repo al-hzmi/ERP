@@ -198,6 +198,9 @@ export function TradeDocumentBoard({
               <Field label={definition.counterpartyLabelAr} required>
                 <EntityPicker
                   entity="counterparty"
+                  // Quotations, sales orders and returns face a customer; purchase orders face
+                  // a supplier. The definition already knows which, so the picker can too.
+                  counterpartyType={definition.counterpartyKind}
                   value={counterpartyId}
                   valueLabel={counterpartyLabel}
                   placeholder={`ابحث عن ${definition.counterpartyLabelAr}…`}

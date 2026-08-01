@@ -18,7 +18,7 @@ export const GET = apiHandler(async (context) => {
   // One transaction for five reads: the client extension would otherwise open one
   // per query, each with its own `set_config` round trip.
   const options = await withTenantRead(async (tx) => {
-    const [branches, warehouses, currencies, accounts, tenant] = await Promise.all([
+    const [branches, warehouses, currencies, accounts, taxCodes, tenant] = await Promise.all([
       tx.branch.findMany({
         where: { tenantId: context.tenantId, isActive: true },
         select: { id: true, code: true, nameAr: true },
@@ -41,13 +41,27 @@ export const GET = apiHandler(async (context) => {
         select: { id: true, code: true, nameAr: true, type: true },
         orderBy: { code: 'asc' },
       }),
+      // Bounded like the rest — a tenant has a handful of VAT treatments, not thousands — and
+      // needed before the line grid can render its rate column at all.
+      tx.taxCode.findMany({
+        where: { tenantId: context.tenantId, isActive: true },
+        select: {
+          id: true,
+          code: true,
+          nameAr: true,
+          rate: true,
+          treatment: true,
+          isDefault: true,
+        },
+        orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }],
+      }),
       tx.tenant.findUniqueOrThrow({
         where: { id: context.tenantId },
         select: { functionalCurrency: true },
       }),
     ]);
 
-    return { branches, warehouses, currencies, accounts, tenant };
+    return { branches, warehouses, currencies, accounts, taxCodes, tenant };
   });
 
   return ok({
@@ -55,6 +69,16 @@ export const GET = apiHandler(async (context) => {
     warehouses: options.warehouses,
     currencies: options.currencies,
     accounts: options.accounts,
+    taxCodes: options.taxCodes.map((taxCode) => ({
+      id: taxCode.id,
+      code: taxCode.code,
+      nameAr: taxCode.nameAr,
+      // A string, not a Decimal: the client does exact arithmetic on it and a float would
+      // reintroduce the rounding this system exists to avoid.
+      rate: taxCode.rate.toFixed(2),
+      treatment: taxCode.treatment,
+      isDefault: taxCode.isDefault,
+    })),
     functionalCurrency: options.tenant.functionalCurrency,
   });
 });

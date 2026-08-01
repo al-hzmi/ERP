@@ -324,6 +324,42 @@ describe('inventory rules', () => {
     expect(journal?.status).toBe('POSTED');
     expect(journal?.totalDebit.toFixed(2)).toBe(journal?.totalCredit.toFixed(2));
 
+    // Balanced is necessary and nowhere near sufficient: a journal that debited and credited
+    // the *same* account would balance perfectly and record nothing. So assert the shape of
+    // the entry a sale actually makes — receivable and cost of sales on the debit side,
+    // revenue, VAT and inventory on the credit side.
+    const byAccount = new Map<string, { debit: string; credit: string }>();
+    for (const line of journal?.lines ?? []) {
+      const account = await prisma.account.findUniqueOrThrow({
+        where: { id: line.accountId },
+        select: { code: true },
+      });
+      const current = byAccount.get(account.code) ?? { debit: '0', credit: '0' };
+      byAccount.set(account.code, {
+        debit: (Number(current.debit) + Number(line.debit.toFixed(2))).toFixed(2),
+        credit: (Number(current.credit) + Number(line.credit.toFixed(2))).toFixed(2),
+      });
+    }
+
+    const debits = [...byAccount.entries()].filter(([, side]) => Number(side.debit) > 0);
+    const credits = [...byAccount.entries()].filter(([, side]) => Number(side.credit) > 0);
+
+    // 10 x 80.00 = 800.00 net, 15% VAT = 120.00, gross 920.00; cost 10 x 50.00 = 500.00.
+    expect(debits.map(([code]) => code).sort()).toHaveLength(2);
+    expect(credits.map(([code]) => code).sort()).toHaveLength(3);
+
+    const totalDebit = debits.reduce((sum, [, side]) => sum + Number(side.debit), 0);
+    const totalCredit = credits.reduce((sum, [, side]) => sum + Number(side.credit), 0);
+    expect(totalDebit.toFixed(2)).toBe('1420.00');
+    expect(totalCredit.toFixed(2)).toBe('1420.00');
+
+    // No account may appear on both sides of one entry — that is the netting a balanced-only
+    // assertion cannot see.
+    const bothSides = [...byAccount.entries()].filter(
+      ([, side]) => Number(side.debit) > 0 && Number(side.credit) > 0,
+    );
+    expect(bothSides.map(([code]) => code)).toEqual([]);
+
     const level = await prisma.stockLevel.findFirst({
       where: { tenantId: fixture.tenantId, productId: fixture.productId, warehouseId: fixture.warehouseId },
     });

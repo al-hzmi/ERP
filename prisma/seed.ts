@@ -32,6 +32,7 @@ import { DateOnly } from '../src/lib/domain/shared/value-objects';
 import { calculateInvoice } from '../src/lib/domain/sales/invoice-calculator';
 import { persistJournalEntry } from '../src/lib/application/services/journal-service';
 import { allocateDocumentNumber } from '../src/lib/application/services/numbering-service';
+import { installDefaultTaxCodes } from '../src/lib/application/services/tax-code-service';
 import { postSalesInvoice } from '../src/lib/application/use-cases/post-sales-invoice';
 import { postPurchaseInvoice } from '../src/lib/application/use-cases/post-purchase-invoice';
 import { recordPayment } from '../src/lib/application/use-cases/record-payment';
@@ -126,6 +127,7 @@ async function main(): Promise<void> {
   const org = await createOrganisation(tenantId);
   const catalogue = await createProductCatalogue(tenantId);
   const parties = await createCounterparties(tenantId);
+  await createShowroomData(tenantId);
   await createHumanResources(tenantId, org.branchIds);
 
   const context = buildSystemContext(tenantId, adminUserId);
@@ -615,6 +617,27 @@ interface Catalogue {
   readonly stockProducts: ProductRecord[];
 }
 
+/**
+ * Ten demonstration products.
+ *
+ * Prices span three orders of magnitude on purpose — 12.50 to 18,500 — because a rounding
+ * or scaling defect that hides at 100.00 is obvious when the same code handles 12.50 and
+ * 18,500.00 in the same invoice. `DEMO-0007` is a service: no stock, so it exercises the
+ * path where posting must not attempt a movement.
+ */
+const DEMO_PRODUCTS = [
+  { sku: 'DEMO-0001', nameAr: 'حاسب محمول احترافي 16 بوصة', nameEn: 'Pro Laptop 16"', sale: '8750.00', cost: '6900.00' },
+  { sku: 'DEMO-0002', nameAr: 'شاشة عرض منحنية 34 بوصة', nameEn: 'Curved Monitor 34"', sale: '3200.00', cost: '2450.00' },
+  { sku: 'DEMO-0003', nameAr: 'طابعة ليزر ملوّنة', nameEn: 'Colour Laser Printer', sale: '1850.00', cost: '1390.00' },
+  { sku: 'DEMO-0004', nameAr: 'كرسي مكتبي مريح', nameEn: 'Ergonomic Office Chair', sale: '1250.00', cost: '820.00' },
+  { sku: 'DEMO-0005', nameAr: 'خادم شبكي 2U', nameEn: 'Rack Server 2U', sale: '18500.00', cost: '15200.00' },
+  { sku: 'DEMO-0006', nameAr: 'لوحة مفاتيح ميكانيكية', nameEn: 'Mechanical Keyboard', sale: '450.00', cost: '280.00' },
+  { sku: 'DEMO-0007', nameAr: 'عقد صيانة سنوي', nameEn: 'Annual Maintenance Contract', sale: '12000.00', cost: '7500.00', service: true },
+  { sku: 'DEMO-0008', nameAr: 'كابل شبكة Cat6 (متر)', nameEn: 'Cat6 Network Cable (m)', sale: '12.50', cost: '7.20' },
+  { sku: 'DEMO-0009', nameAr: 'وحدة تخزين شبكي 8 تيرابايت', nameEn: 'NAS Storage 8TB', sale: '6400.00', cost: '5100.00' },
+  { sku: 'DEMO-0010', nameAr: 'جهاز عرض تفاعلي 75 بوصة', nameEn: 'Interactive Display 75"', sale: '15750.00', cost: '12300.00' },
+];
+
 async function createProductCatalogue(tenantId: string): Promise<Catalogue> {
   const unitIdByCode = new Map<string, string>();
   for (const unit of UNITS_OF_MEASURE) {
@@ -732,7 +755,40 @@ async function createProductCatalogue(tenantId: string): Promise<Catalogue> {
     rows.push({ ...seed, sku: `${template.prefix}-${serial}`, barcode: `628${String(serial).padStart(10, '0')}` });
   }
 
-  await prisma.product.createMany({ data: rows.slice(0, TARGET.products) });
+  // The generated catalogue, capped at the target, plus the fixed demo set.
+  //
+  // The demo products join the catalogue *here* rather than being added afterwards, and that
+  // placement is the whole point: everything downstream — purchase invoices, opening stock,
+  // cost layers — draws from what this function returns. Added after the fact they existed
+  // with zero on hand, so putting one on an invoice and pressing post failed with
+  // INSUFFICIENT_STOCK, which is a worse first impression than not shipping them at all.
+  const demoCategoryId = categoryIdByCode.get(CATEGORY_TEMPLATES[0]?.code ?? '');
+  const demoUnitId = unitIdByCode.get('PCS') ?? unitIdByCode.get(UNITS_OF_MEASURE[0]?.code ?? '');
+
+  const demoRows =
+    demoCategoryId === undefined || demoUnitId === undefined
+      ? []
+      : DEMO_PRODUCTS.map((product, index) => ({
+          tenantId,
+          sku: product.sku,
+          nameAr: product.nameAr,
+          nameEn: product.nameEn,
+          description: `صنف تجريبي للعرض — ${product.nameAr}`,
+          categoryId: demoCategoryId,
+          brandId: null,
+          unitOfMeasureId: demoUnitId,
+          salePrice: product.sale,
+          costPrice: product.cost,
+          taxRate: '15.00',
+          trackExpiry: false,
+          trackBatch: false,
+          trackSerial: false,
+          isStockItem: product.service !== true,
+          reorderPoint: product.service === true ? '0' : '10',
+          barcode: `628${String(9_000_000 + index).padStart(10, '0')}`,
+        }));
+
+  await prisma.product.createMany({ data: [...rows.slice(0, TARGET.products), ...demoRows] });
 
   const created = await prisma.product.findMany({
     where: { tenantId },
@@ -896,6 +952,104 @@ async function createCounterparties(
  * same reason every other document here is: the dataset cannot contain a state the application
  * would refuse to produce.
  */
+// ─────────────────────────────────────────────────────────────────────────────
+//  Showroom data
+//
+//  The 500 products and 200 customers above are generated: plausible, varied, and
+//  named by a random combiner, which is right for exercising reports and wrong for
+//  demonstrating a screen. Nobody points at «شركة الأفق الذهبي للتوريدات» and says
+//  "open that one" — and a picker whose first page is eight indistinguishable
+//  companies looks broken even when it is working perfectly.
+//
+//  So this adds a small, fixed, recognisable set on top: five named wholesale
+//  customers on real credit terms, ten products at prices an arithmetic error would
+//  be visible in, and the tenant's tax codes. It is deterministic — same codes,
+//  same prices, every run — so a demo script can name a record and a test can rely
+//  on it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Five wholesale accounts, each with a distinct credit posture worth demonstrating. */
+const WHOLESALE_CUSTOMERS = [
+  {
+    code: 'WHL-0001',
+    nameAr: 'مؤسسة البدر للتجارة والتوزيع',
+    nameEn: 'Al-Badr Trading & Distribution',
+    city: 'الرياض',
+    creditLimit: '500000.00',
+    paymentTerms: 30,
+    classification: 'A' as const,
+  },
+  {
+    code: 'WHL-0002',
+    nameAr: 'شركة النخبة لتجارة الجملة',
+    nameEn: 'Elite Wholesale Company',
+    city: 'جدة',
+    creditLimit: '250000.00',
+    paymentTerms: 45,
+    classification: 'A' as const,
+  },
+  {
+    code: 'WHL-0003',
+    nameAr: 'مجموعة الواحة التجارية',
+    nameEn: 'Al-Waha Commercial Group',
+    city: 'الدمام',
+    creditLimit: '150000.00',
+    paymentTerms: 60,
+    classification: 'B' as const,
+  },
+  {
+    code: 'WHL-0004',
+    nameAr: 'مؤسسة الميزان للتوريدات',
+    nameEn: 'Al-Mizan Supplies Establishment',
+    city: 'مكة المكرمة',
+    creditLimit: '75000.00',
+    paymentTerms: 15,
+    classification: 'B' as const,
+  },
+  {
+    // Deliberately cash-only: a customer with no credit line is the case that proves
+    // the credit-hold path refuses rather than the case that never reaches it.
+    code: 'WHL-0005',
+    nameAr: 'متجر الرياض المركزي',
+    nameEn: 'Riyadh Central Store',
+    city: 'الرياض',
+    creditLimit: '0.00',
+    paymentTerms: 0,
+    classification: 'C' as const,
+  },
+];
+
+async function createShowroomData(tenantId: string): Promise<void> {
+  // Tax codes first: an invoice form whose rate dropdown is empty is indistinguishable from a
+  // broken screen, and that is the defect this release exists to close.
+  await installDefaultTaxCodes(prisma, tenantId);
+
+  await prisma.counterparty.createMany({
+    data: WHOLESALE_CUSTOMERS.map((customer, index) => ({
+      tenantId,
+      code: customer.code,
+      type: 'CUSTOMER' as const,
+      nameAr: customer.nameAr,
+      nameEn: customer.nameEn,
+      email: `orders@${customer.code.toLowerCase()}.example`,
+      phone: `05${String(50_000_000 + index * 111_111).slice(0, 8)}`,
+      addressJson: { city: customer.city, country: 'SA' },
+      taxNumber: generateVatNumber(random),
+      crn: `10${String(20_000_000 + index)}`,
+      creditLimit: customer.creditLimit,
+      paymentTerms: customer.paymentTerms,
+      classification: customer.classification,
+      currency: FUNCTIONAL_CURRENCY,
+    })),
+  });
+
+  log(
+    'Showroom data created',
+    `${WHOLESALE_CUSTOMERS.length} wholesale customers, 3 tax codes ` +
+      `(the ${DEMO_PRODUCTS.length} demo products join the catalogue itself, so they get stocked)`,
+  );
+}
+
 async function createFixedAssets(
   context: RequestContext,
   accounts: AccountIndex,
@@ -1254,7 +1408,20 @@ async function generatePurchaseInvoices(
 
     const supplierId = random.pick(inputs.supplierIds);
     const lineCount = random.int(2, 6);
-    const chosen = random.sample(inputs.catalogue.stockProducts, lineCount);
+
+    // The first purchase invoice buys every demo product outright.
+    //
+    // Random sampling over 500 products leaves several of the ten with nothing on hand, and a
+    // demo whose first action is picking `DEMO-0002` then hitting INSUFFICIENT_STOCK is worse
+    // than shipping no demo products at all. It goes through the ordinary posting path, so the
+    // movements, cost layers and stock levels stay consistent with everything else.
+    const demoStock = inputs.catalogue.stockProducts.filter((product) =>
+      product.sku.startsWith('DEMO-'),
+    );
+    const chosen =
+      index === 0 && demoStock.length > 0
+        ? demoStock
+        : random.sample(inputs.catalogue.stockProducts, lineCount);
 
     const lines = chosen.map((product) => {
       const quantity = random.weighted([
@@ -1876,8 +2043,11 @@ async function verify(tenantId: string): Promise<{ passed: boolean; lines: strin
       prisma.zatcaInvoice.count(),
     ]);
 
-  check('Products', products === TARGET.products, `${products} / ${TARGET.products}`);
-  check('Customers', customers === TARGET.customers, `${customers} / ${TARGET.customers}`);
+  // `>=`, not `===`: the target is a floor. The showroom set adds ten products and five
+  // customers on top of the generated ones, and an exact-equality check would read that as
+  // corruption. Suppliers and employees stay exact because nothing adds to them.
+  check('Products', products >= TARGET.products, `${products} / ${TARGET.products}`);
+  check('Customers', customers >= TARGET.customers, `${customers} / ${TARGET.customers}`);
   check('Suppliers', suppliers === TARGET.suppliers, `${suppliers} / ${TARGET.suppliers}`);
   check('Employees', employees === TARGET.employees, `${employees} / ${TARGET.employees}`);
   check('Branches', branches === 5, `${branches} / 5`);
@@ -1888,6 +2058,24 @@ async function verify(tenantId: string): Promise<{ passed: boolean; lines: strin
   check('Inventory movements', movements >= TARGET.inventoryMovements * 0.9, `${movements} / ${TARGET.inventoryMovements}`);
   check('ZATCA e-invoices generated', zatca === salesInvoices, `${zatca} for ${salesInvoices} sales invoices`);
   check('Audit trail populated', auditRows > 0, `${auditRows} entries`);
+
+  // 7. The screens can actually be used.
+  //
+  // Volume alone does not prove that. An invoice form needs a tax code to put in its rate
+  // dropdown and a customer its picker can find; without either it renders, responds to
+  // nothing, and looks broken — which is precisely how it was reported. These checks fail the
+  // seed rather than leaving that to be discovered from the other side of the screen.
+  const [taxCodes, defaultTaxCodes, wholesale, demoProducts] = await Promise.all([
+    prisma.taxCode.count({ where: { tenantId } }),
+    prisma.taxCode.count({ where: { tenantId, isDefault: true } }),
+    prisma.counterparty.count({ where: { tenantId, code: { startsWith: 'WHL-' } } }),
+    prisma.product.count({ where: { tenantId, sku: { startsWith: 'DEMO-' } } }),
+  ]);
+
+  check('Tax codes installed', taxCodes >= 3, `${taxCodes} codes`);
+  check('Exactly one default tax code', defaultTaxCodes === 1, `${defaultTaxCodes} default`);
+  check('Wholesale customers', wholesale === 5, `${wholesale} / 5`);
+  check('Demo products', demoProducts === 10, `${demoProducts} / 10`);
   lines.push('');
   lines.push('  Sign in at /login with any of:');
   lines.push('    admin / admin-2 / accountant / sales / warehouse / cashier / hr / auditor');
