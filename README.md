@@ -43,7 +43,7 @@ it, `auditor` can read everything and change nothing.
 > database is reachable by anyone you did not invite.
 
 ```bash
-npm test           # 783 tests (449 unit + 334 integration)
+npm test           # 807 tests (464 unit + 343 integration)
 npm run typecheck  # strict TypeScript, no `any`, no `@ts-ignore`
 npm run build      # production build
 ```
@@ -117,8 +117,8 @@ prisma/
 ├── migrations/               17 migrations (see below)
 └── seed.ts + seed/           the data generator
 tests/
-├── unit/                     449 tests, no database required
-└── integration/              334 tests against real PostgreSQL
+├── unit/                     464 tests, no database required
+└── integration/              343 tests against real PostgreSQL
 ```
 
 Dependencies point inward. `domain/` imports nothing from `application/` or
@@ -235,6 +235,7 @@ only the application change that put every read path inside a tenant scope. See
 | Concurrency | `application/services/inventory-service.ts` | Row locks taken *before* the read a decision depends on, so two concurrent sales of the last unit cannot both succeed |
 | Segregation of duties | `infrastructure/auth/segregation-of-duties.ts` | A conflict matrix over lifecycle steps, plus toxic-combination detection at role-assignment time |
 | Search | `application/services/search-service.ts` | Exact/prefix/substring/trigram combined into one SQL-side relevance score — typing `1001` finds `BTC-1001` |
+| QR encoding | `domain/zatca/qr-matrix.ts` | ISO/IEC 18004 byte mode at level M, mask chosen by penalty score — and a test that decodes the matrix back, because a QR that renders but does not scan fails in the customer's hand |
 | Pickers that open | `components/ui/entity-picker.tsx` | Clicking shows the first page of the list, typing narrows it; an empty `q` is browse, not "no results" — and the three empty states say which of the three they are |
 | ZATCA envelope | `application/services/zatca-service.ts` | UBL 2.1 XML, gap-free invoice counter, SHA-256 chained to the predecessor, byte-correct Base64 TLV QR |
 | ZATCA cryptography | `domain/zatca/zatca-crypto.ts` | ECDSA P-256 over a XAdES `SignedInfo`, the certificate digest computed ZATCA's non-obvious way, and QR tags 7–9 carried as raw DER rather than double-encoded |
@@ -547,6 +548,31 @@ order entry. **IAS 2** — purchases are capitalised net of trade discount and
 excluding recoverable VAT; both FIFO and weighted average are supported.
 **IAS 21** — realised FX differences on settlement go to profit or loss
 immediately.
+
+### The action bar, and a sticky that did not stick
+
+The save and cancel buttons sat about 350px below the fold on a laptop — measured off-screen
+at 1366x768, 1280x600 and 1024x640 with a seven-line invoice. The page scrolled, but a form
+whose only visible controls are its inputs reads as one that cannot be submitted.
+
+The first fix put a `sticky bottom-0` bar inside the totals card, and it did not work. Worth
+recording, because it looks like it should: `position: sticky` pins an element only while its
+*containing block* is on screen, and inside the card there were forty pixels of content below
+it — so it stuck for forty pixels and then scrolled away like anything else. Moving it to be a
+direct child of the `<form>`, which spans the whole page, is what made it stay.
+
+### Drawing a QR without a QR library
+
+The printed invoice needs a scannable ZATCA code and nothing in the tree could draw one. An npm
+package would be a new runtime dependency for one screen; an image service would put a
+taxpayer's invoice totals through a third party. So `qr-matrix.ts` implements ISO/IEC 18004 —
+byte mode, level M, versions 1 to 40, mask chosen by the specification's penalty rules.
+
+The load-bearing test is a decoder: it undoes the mask, walks the data placement backwards and
+recovers the original bytes, including a real ZATCA TLV payload. It caught a genuine bug on
+first run — the mask number was being read from format bits 0 to 2 when it lives at bits 10 to
+12, so five of the fifteen tests failed against a matrix that looked perfectly plausible. A QR
+that renders but does not scan is worse than none: it fails in the customer's hand.
 
 ### The invoice screen, and why it looked dead
 

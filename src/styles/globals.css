@@ -250,4 +250,30 @@
   .card-surface {
     @apply border border-black/20 shadow-none;
   }
+
+  /* A printed invoice is a document, not a page of an application: no sticky bars, no
+     backdrop blur (which prints as a grey wash), and margins the printer can actually reach. */
+  .sticky {
+    position: static !important;
+  }
+
+  .backdrop-blur,
+  .backdrop-blur-sm {
+    backdrop-filter: none !important;
+  }
+
+  @page {
+    margin: 14mm;
+  }
+
+  /* An invoice line must not be split across two sheets — half a line on each page is how a
+     printed total stops reconciling to the lines above it. */
+  tr,
+  figure {
+    break-inside: avoid;
+  }
+
+  thead {
+    display: table-header-group;
+  }
 }

@@ -600,15 +600,6 @@ export function InvoiceForm(): JSX.Element {
             </p>
           ) : null}
 
-          <div className="flex flex-wrap justify-end gap-3">
-            <Button type="button" variant="outline" onClick={() => router.push('/sales/invoices')}>
-              إلغاء
-            </Button>
-            <Button type="submit" loading={submitting} disabled={!canSubmit}>
-              حفظ كمسودة
-            </Button>
-          </div>
-
           <p className="text-end text-xs text-muted-foreground">
             تُحفظ الفاتورة كمسودة. الترحيل خطوة منفصلة تتطلب صلاحية الترحيل.
             {draft.savedAt !== null ? (
@@ -623,6 +614,33 @@ export function InvoiceForm(): JSX.Element {
           </p>
         </CardBody>
       </Card>
+
+      {/* Pinned to the bottom of the viewport, and a direct child of the form on purpose.
+          
+          An invoice with seven lines is about 1,600px tall, so on any laptop the actions sat
+          roughly 350px below the fold. The page scrolled — but the buttons were never visible
+          without scrolling first, and a form whose only visible controls are its inputs reads
+          as one that cannot be submitted. Measured at 1366x768, 1280x600 and 1024x640 before
+          the change: off-screen at all three.
+
+          The first attempt put this inside the totals card and it did not stick, which is worth
+          recording because it looks like it should. `position: sticky` pins an element only
+          while its *containing block* is still on screen; inside the card there were forty
+          pixels of content below it, so it stuck for forty pixels and then scrolled away like
+          anything else. As a direct child of the form — which spans the whole page — it stays
+          pinned for the entire scroll.
+
+          `sticky` rather than `fixed`: it stays in the document flow, so it cannot overlap the
+          content beneath it or escape the form's width. `no-print` because a printed invoice
+          has no buttons. */}
+      <div className="no-print sticky bottom-0 z-10 -mx-1 flex flex-wrap justify-end gap-3 rounded-t-lg border-t border-border bg-background/95 px-5 py-3 backdrop-blur">
+        <Button type="button" variant="outline" onClick={() => router.push('/sales/invoices')}>
+          إلغاء
+        </Button>
+        <Button type="submit" loading={submitting} disabled={!canSubmit}>
+          حفظ كمسودة
+        </Button>
+      </div>
     </form>
   );
 }
